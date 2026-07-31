@@ -111,14 +111,26 @@ python scraper/runner.py
 
 ## Database Migration (PostgreSQL)
 
-The migration script is completely idempotent. It safely adds missing columns for both SQLite and PostgreSQL without recreating tables or losing data.
+The migration script safely sets up tables and adds missing columns for both SQLite and PostgreSQL without recreating tables or losing data.
 
-```bash
-# Sets up tables (if they don't exist)
-uvicorn backend.main:app &
-# Run migration script
-python scripts/migrate_db.py
-```
+### Production Deployment Steps:
+1. Deploy Backend to your provider (e.g., Railway).
+2. Configure the `DATABASE_URL` environment variable to point to the newly provisioned PostgreSQL instance.
+3. Execute the migration script on the server:
+   ```bash
+   python scripts/migrate_db.py
+   ```
+4. Verify that tables were created successfully by checking the server logs or querying the database.
+
+---
+
+## Migrating Existing SQLite Data
+
+- **Local SQLite data is NOT automatically copied into PostgreSQL.**
+- Your production PostgreSQL database will start completely empty.
+- Existing products, alerts, price snapshots, and history remain exclusively inside your local `price_tracker.db`.
+- **Note:** If you want production to contain the same historical data you gathered locally, you must manually migrate your SQLite database records into PostgreSQL before switching production traffic. 
+- No built-in migration utility is provided for transferring data between SQLite and PostgreSQL, so plan accordingly.
 
 ---
 
@@ -158,16 +170,32 @@ python scripts/migrate_db.py
 
 - **Scraper Timeouts:** Playwright will automatically timeout after 30 seconds and increment the retry counter. Ensure network isn't blocked.
 - **Database URL Issues:** If using Heroku/Railway, `postgres://` URLs are automatically rewritten to `postgresql://` by the app to support SQLAlchemy.
-- **Playwright Missing:** Ensure `playwright install chromium` was run on the production server.
+- **Playwright Missing:** Ensure `playwright install chromium` was run on the production server. (Railway deployments require Chromium).
 - **CORS Errors:** Verify `ALLOWED_ORIGINS` in `.env` matches your frontend URL EXACTLY.
+
+---
+
+## Final Verification Notes
+
+**CRITICAL:** The backend API may report as "healthy" (returning 200 OK on `/health`), while the background scraper will still silently fail if the Playwright Chromium browser binaries are missing from the production environment. Always run a manual test scrape to verify Chromium is installed before considering the deployment successful.
 
 ---
 
 ## Production Checklist
 
-- [ ] `DATABASE_URL` is set to PostgreSQL.
-- [ ] `ALLOWED_ORIGINS` is set properly.
-- [ ] Twilio credentials are correct and numbers are opted-in to the sandbox.
-- [ ] Playwright browsers are installed (`playwright install chromium`).
-- [ ] Migration script `python scripts/migrate_db.py` ran successfully.
-- [ ] Scraper cron job (`scraper/runner.py`) is scheduled to run hourly.
+- [ ] PostgreSQL database created
+- [ ] `DATABASE_URL` configured
+- [ ] `migrate_db.py` executed successfully
+- [ ] Playwright Chromium installed
+- [ ] Backend health endpoint verified
+- [ ] Version endpoint verified
+- [ ] Metrics endpoint verified
+- [ ] Product tracking tested
+- [ ] Background scraping tested
+- [ ] WhatsApp notification tested
+- [ ] CSV export tested
+- [ ] Search tested
+- [ ] Pagination tested
+- [ ] Retry tested
+- [ ] Delete tested
+- [ ] Fake discount detection verified
