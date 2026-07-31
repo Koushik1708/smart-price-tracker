@@ -1,0 +1,42 @@
+Traceback (most recent call last):
+  File "C:\Users\koush\Downloads\letsgo\scraper\runner.py", line 36, in scrape_single_product
+    data = await scraper.fetch_product_data(product.url)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\koush\Downloads\letsgo\scraper\amazon_scraper.py", line 9, in fetch_product_data
+    async with async_playwright() as p:
+               ~~~~~~~~~~~~~~~~^^
+  File "C:\Users\koush\Downloads\letsgo\venv\Lib\site-packages\playwright\async_api\_context_manager.py", line 46, in __aenter__
+    playwright = AsyncPlaywright(next(iter(done)).result())
+                                 ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\koush\Downloads\letsgo\venv\Lib\site-packages\playwright\_impl\_transport.py", line 120, in connect
+    self._proc = await asyncio.create_subprocess_exec(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<9 lines>...
+    )
+    ^
+  File "C:\Users\koush\AppData\Local\Programs\Python\Python313\Lib\asyncio\subprocess.py", line 224, in create_subprocess_exec
+    transport, protocol = await loop.subprocess_exec(
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        stderr=stderr, **kwds)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\koush\AppData\Local\Programs\Python\Python313\Lib\asyncio\base_events.py", line 1788, in subprocess_exec
+    transport = await self._make_subprocess_transport(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        protocol, popen_args, False, stdin, stdout, stderr,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        bufsize, **kwargs)
+        ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\koush\AppData\Local\Programs\Python\Python313\Lib\asyncio\base_events.py", line 533, in _make_subprocess_transport
+    raise NotImplementedError
+NotImplementedError
+Traceback (most recent call last):
+  File "C:\Users\koush\Downloads\letsgo\scraper\runner.py", line 74, in _async_scrape_single_product
+    success = notifier.send_alert(alert.phone_number, msg)
+  File "C:\Users\koush\Downloads\letsgo\backend\notifications.py", line 22, in send_alert
+    print(f"[Twilio Provider] Sending WhatsApp to {phone_number}: {message}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\koush\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u20b9' in position 137: character maps to <undefined>
