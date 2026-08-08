@@ -155,7 +155,8 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
         "cpu": "unknown",
         "queue": "unknown",
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "request_id": getattr(request.state, "request_id", "unknown")
+        "request_id": getattr(request.state, "request_id", "unknown"),
+        "env_keys": sorted(list(os.environ.keys()))
     }
 
     critical_failures = []
