@@ -63,9 +63,6 @@ async def _async_scrape_single_product(product_id: int):
             logger.warning(f"Product {product.url} exceeded max retries. Skipping.", extra={"product_id": product.id, "url": product.url})
             return
 
-        if product.status == "SCRAPING":
-            logger.info(f"Product {product.url} is already being scraped. Skipping.", extra={"product_id": product.id, "url": product.url})
-            return
 
         product.status = "SCRAPING"
         db.commit()
