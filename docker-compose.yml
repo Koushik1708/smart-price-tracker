@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: letsgo-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: letsgo-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./price_tracker.db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ENVIRONMENT=production
+      - JWT_SECRET_KEY=949f57d6e6a39a58b29c9b456bd84a7e289bf65db53049b49ab78c66e2c39e24
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - sqlite_data:/app
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: letsgo-celery-worker
+    command: celery -A backend.celery_app:celery_app worker --loglevel=info --pool=solo
+    environment:
+      - DATABASE_URL=sqlite:///./price_tracker.db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ENVIRONMENT=production
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "celery", "-A", "backend.celery_app:celery_app", "inspect", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - sqlite_data:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: letsgo-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+  sqlite_data:

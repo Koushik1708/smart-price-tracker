@@ -13,57 +13,20 @@ import json
 import time
 from dotenv import load_dotenv
 from contextvars import ContextVar
+from backend.config import settings
 
-# Setup ContextVar for Request ID
-request_id_ctx_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+from backend.tracing import get_traced_logger, start_trace, start_span, end_span, clear_context
 
-# Load env
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
-
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
-
-# Structured Logging Setup
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        log_obj = {
-            "time": self.formatTime(record, self.datefmt),
-            "level": record.levelname,
-            "message": record.getMessage(),
-        }
-        req_id = request_id_ctx_var.get()
-        if req_id:
-            log_obj["request_id"] = req_id
-            
-        if hasattr(record, "product_id"):
-            log_obj["product_id"] = record.product_id
-        if hasattr(record, "platform"):
-            log_obj["platform"] = record.platform
-        if hasattr(record, "url"):
-            log_obj["url"] = record.url
-        if hasattr(record, "status"):
-            log_obj["status"] = record.status
-        if hasattr(record, "processing_time"):
-            log_obj["processing_time"] = record.processing_time
-        if hasattr(record, "error_reason"):
-            log_obj["error_reason"] = record.error_reason
-
-        return json.dumps(log_obj)
-
-log_handler = logging.StreamHandler(sys.stdout)
-log_handler.setFormatter(JSONFormatter())
-logging.basicConfig(level=logging.INFO, handlers=[log_handler])
-logger = logging.getLogger(__name__)
+logger = get_traced_logger(__name__)
 
 # Environment Validation
-if not os.getenv("DATABASE_URL"):
+if not settings.DATABASE_URL:
     logger.warning("DATABASE_URL is not set. Falling back to local SQLite.")
 
-optional_vars = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_NUMBER", "TARGET_WHATSAPP_NUMBER", "FRONTEND_URL"]
-for var in optional_vars:
-    if not os.getenv(var):
-        logger.warning(f"Optional environment variable {var} is missing. Some features may be degraded.")
+if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+    logger.warning("Optional Twilio environment variables are missing. Some features may be degraded.")
 
-# SlowAPI Setup
+# Main FastAPI Application Setup - Auth updated case-insensitive
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -76,20 +39,30 @@ if sys.platform == "win32" and sys.version_info < (3, 8):
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Price Tracker & Fake Discount MVP")
+app = FastAPI(
+    title="Price History & Fake-Discount Tracker Enterprise API",
+    description="Enterprise-grade pricing tracker, fake-discount detector, and administrative governance system.",
+    version=settings.API_VERSION,
+    openapi_tags=[
+        {"name": "auth", "description": "Authentication and Identity Management"},
+        {"name": "dashboard", "description": "User Dashboard Analytics and Metrics"},
+        {"name": "products", "description": "Product Tracking, Snapshots, and CSV Exports"},
+        {"name": "alerts", "description": "WhatsApp Price Drop Alerts"},
+        {"name": "admin", "description": "Enterprise Administration, System Diagnostics, and Audit Logging"},
+    ]
+)
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler) # type: ignore
 
 # CORS Configuration
-allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
-if allowed_origins_env:
-    origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+if settings.ALLOWED_ORIGINS:
+    origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
 else:
     origins = ["http://localhost:5173"]
 
-if FRONTEND_URL and FRONTEND_URL not in origins:
-    origins.append(FRONTEND_URL)
+if settings.FRONTEND_URL and settings.FRONTEND_URL not in origins:
+    origins.append(settings.FRONTEND_URL)
 
 app.add_middleware(
     CORSMiddleware,
@@ -99,47 +72,131 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Security Headers Middleware
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self' http: https: data: 'unsafe-inline' 'unsafe-eval';"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
 # Request ID Middleware
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     req_id = str(uuid.uuid4())
-    request_id_ctx_var.set(req_id)
+    trace_id = start_trace(req_id)
+    start_span("API")
     request.state.request_id = req_id
     
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
+    is_metrics_path = request.url.path in ["/metrics/prometheus", "/internal/metrics"]
     
-    response.headers["X-Request-ID"] = req_id
-    logger.info(f"{request.method} {request.url.path} completed", extra={"processing_time": f"{process_time:.4f}s", "status": response.status_code})
-    return response
+    start_time = time.perf_counter()
+    try:
+        if not is_metrics_path:
+            logger.info(f"Request received: {request.method} {request.url.path}", extra={"event": "request_received"})
+        response = await call_next(request)
+        process_time = time.perf_counter() - start_time
+        
+        response.headers["X-Request-ID"] = req_id
+        response.headers["X-Trace-ID"] = trace_id or ""
+        
+        if not is_metrics_path:
+            logger.info(f"{request.method} {request.url.path} completed", extra={"execution_time_ms": int(process_time * 1000), "status": response.status_code})
+            try:
+                from backend.metrics import HTTP_REQUESTS_TOTAL, HTTP_REQUEST_LATENCY
+                HTTP_REQUESTS_TOTAL.labels(method=request.method, endpoint=request.url.path, status=response.status_code).inc()
+                HTTP_REQUEST_LATENCY.labels(method=request.method, endpoint=request.url.path).observe(process_time)
+            except Exception as e:
+                logger.warning(f"Failed to record Prometheus metrics: {e}")
+                
+        return response
+    finally:
+        clear_context()
 
 # Centralized Exception Handlers
+import datetime
+
+def build_error_response(request: Request, status_code: int, message: str, error_code: str, details=None):
+    req_id = getattr(request.state, "request_id", "unknown")
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "message": message,
+            "error_code": error_code,
+            "error": {
+                "code": error_code,
+                "message": message,
+                "details": details
+            },
+            "request_id": req_id,
+            "timestamp": timestamp
+        }
+    )
+
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"success": False, "message": str(exc.detail), "error_code": "HTTP_ERROR"}
-    )
+    return build_error_response(request, exc.status_code, exc.detail, "HTTP_ERROR")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={"success": False, "message": "Validation Error", "details": exc.errors(), "error_code": "VALIDATION_ERROR"}
-    )
+    try:
+        from backend.metrics import EXCEPTION_COUNTER
+        EXCEPTION_COUNTER.labels(exception_type="ValidationError").inc()
+    except Exception:
+        pass
+    return build_error_response(request, 422, "Validation Error", "VALIDATION_ERROR", exc.errors())
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     error_id = getattr(request.state, "request_id", "unknown")
     logger.error(f"Unhandled Exception: {str(exc)}", exc_info=True, extra={"request_id": error_id})
-    return JSONResponse(
-        status_code=500,
-        content={"success": False, "message": "Internal Server Error", "error_code": "INTERNAL_ERROR", "debug": str(exc)}
-    )
+    
+    try:
+        from backend.metrics import EXCEPTION_COUNTER
+        from sqlalchemy.exc import SQLAlchemyError
+        from redis.exceptions import RedisError
+        
+        if isinstance(exc, SQLAlchemyError):
+            EXCEPTION_COUNTER.labels(exception_type="DatabaseError").inc()
+        elif isinstance(exc, RedisError):
+            EXCEPTION_COUNTER.labels(exception_type="RedisError").inc()
+        elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timeout" in str(exc).lower():
+            EXCEPTION_COUNTER.labels(exception_type="TimeoutError").inc()
+        else:
+            exc_name = type(exc).__name__
+            if "twilio" in exc_name.lower():
+                EXCEPTION_COUNTER.labels(exception_type="TwilioError").inc()
+            elif "playwright" in exc_name.lower():
+                EXCEPTION_COUNTER.labels(exception_type="PlaywrightError").inc()
+            else:
+                EXCEPTION_COUNTER.labels(exception_type="UnknownError").inc()
+    except Exception:
+        pass
+        
+    return build_error_response(request, 500, "Internal Server Error", "INTERNAL_ERROR", str(exc))
 
-from backend.api_routes import router
-app.include_router(router)
+from backend.api_routes import router as api_router
+from backend.auth_routes import router as auth_router
+from backend.dashboard_routes import router as dashboard_router
+from backend.admin_routes import router as admin_router
+app.include_router(auth_router)
+app.include_router(api_router)
+app.include_router(dashboard_router)
+app.include_router(admin_router)
+
+from fastapi import Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+@app.get("/metrics/prometheus")
+@app.get("/internal/metrics")
+def get_prometheus_metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/")
 def read_root():

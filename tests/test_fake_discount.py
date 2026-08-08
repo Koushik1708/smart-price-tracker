@@ -7,7 +7,7 @@ import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from backend.database import Base
-from backend.models import Product, PriceSnapshot
+from backend.models import Product, PriceSnapshot, User
 from backend.fake_discount import detect_fake_discount
 
 engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
@@ -22,7 +22,11 @@ def db():
     Base.metadata.drop_all(bind=engine)
 
 def test_no_fake_discount_normal_fluctuation(db):
-    product = Product(url="http://test.com/1", platform="amazon", product_id="123")
+    user = User(name="Test", email="test1@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    
+    product = Product(user_id=user.id, url="http://test.com/1", platform="amazon", product_id="123")
     db.add(product)
     db.commit()
     
@@ -39,7 +43,11 @@ def test_no_fake_discount_normal_fluctuation(db):
     assert is_fake is False
 
 def test_fake_discount_detected(db):
-    product = Product(url="http://test.com/2", platform="amazon", product_id="456")
+    user = User(name="Test", email="test2@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    
+    product = Product(user_id=user.id, url="http://test.com/2", platform="amazon", product_id="456")
     db.add(product)
     db.commit()
     
@@ -65,7 +73,11 @@ def test_fake_discount_detected(db):
     assert is_fake is True
 
 def test_not_enough_history(db):
-    product = Product(url="http://test.com/3", platform="amazon", product_id="789")
+    user = User(name="Test", email="test3@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    
+    product = Product(user_id=user.id, url="http://test.com/3", platform="amazon", product_id="789")
     db.add(product)
     db.commit()
     

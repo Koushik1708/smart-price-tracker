@@ -1,0 +1,38 @@
+[
+  {
+    "key": "DATABASE_URL",
+    "value": "postgresql://user:password@hostname/database"
+  },
+  {
+    "key": "ALLOWED_ORIGINS",
+    "value": "https://frontend-kappa-olive-25.vercel.app"
+  },
+  {
+    "key": "FRONTEND_URL",
+    "value": "https://frontend-kappa-olive-25.vercel.app"
+  },
+  {
+    "key": "APP_VERSION",
+    "value": "1.0.0"
+  },
+  {
+    "key": "ENVIRONMENT",
+    "value": "production"
+  },
+  {
+    "key": "TWILIO_ACCOUNT_SID",
+    "value": "YOUR_TWILIO_ACCOUNT_SID"
+  },
+  {
+    "key": "TWILIO_AUTH_TOKEN",
+    "value": "YOUR_TWILIO_AUTH_TOKEN"
+  },
+  {
+    "key": "TWILIO_WHATSAPP_NUMBER",
+    "value": "whatsapp:+14155238886"
+  },
+  {
+    "key": "PLAYWRIGHT_BROWSERS_PATH",
+    "value": "0"
+  }
+]

@@ -8,7 +8,7 @@ def detect_fake_discount(db: Session, product_id: int) -> bool:
     A fake discount is flagged if the current MRP is significantly higher 
     (e.g. > 10%) than the historical average MRP of the last 30 days.
     """
-    thirty_days_ago = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+    thirty_days_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=30)
     
     snapshots = db.query(PriceSnapshot).filter(
         PriceSnapshot.product_id == product_id,

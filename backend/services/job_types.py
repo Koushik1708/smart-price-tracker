@@ -1,0 +1,7 @@
+from enum import Enum
+
+class JobType(str, Enum):
+    SCRAPE_PRODUCT = "SCRAPE_PRODUCT"
+    CHECK_ALERTS = "CHECK_ALERTS"
+    SEND_NOTIFICATION = "SEND_NOTIFICATION"
+    REFRESH_PRICE = "REFRESH_PRICE"

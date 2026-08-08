@@ -1,321 +1,404 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import axios from 'axios';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { API_BASE_URL } from '../config';
+import apiClient from '../apiClient';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, ReferenceDot } from 'recharts';
+import ProductActionsMenu from './common/ProductActionsMenu';
+import EmptyState from './common/EmptyState';
+import { ProductDetailsSkeleton } from './common/Skeletons';
+import { useTheme } from '../ThemeContext';
 
-export default function ProductDashboard({ productId, onProductDeleted, showToast }) {
+const CustomTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    const currentPrice = payload[0].value;
+    const mrp = payload[1]?.value;
+    const diff = mrp ? mrp - currentPrice : 0;
+    const percentage = mrp && diff > 0 ? ((diff / mrp) * 100).toFixed(1) : 0;
+
+    return (
+      <div className="bg-white dark:bg-slate-800 p-3 rounded-xl border border-slate-200 dark:border-slate-700 shadow-xl text-sm">
+        <p className="font-bold text-slate-800 dark:text-slate-100 mb-2 border-b border-slate-100 dark:border-slate-700/60 pb-1">{label}</p>
+        <p className="text-indigo-600 dark:text-indigo-400 font-extrabold flex justify-between gap-4">
+          <span>Price:</span> <span>₹{currentPrice}</span>
+        </p>
+        {mrp && (
+          <p className="text-slate-500 dark:text-slate-400 font-medium flex justify-between gap-4 mt-1">
+            <span>MRP:</span> <span>₹{mrp}</span>
+          </p>
+        )}
+        {percentage > 0 && (
+          <p className="text-emerald-600 dark:text-emerald-400 font-bold flex justify-between gap-4 mt-1 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded">
+            <span>Discount:</span> <span>{percentage}% Off</span>
+          </p>
+        )}
+      </div>
+    );
+  }
+  return null;
+};
+
+export default function ProductDashboard({ productId, onProductDeleted, onProductUpdated, showToast }) {
+  const { theme } = useTheme();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [isDeleting, setIsDeleting] = useState(false);
   
   const [alerts, setAlerts] = useState([]);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [thresholdPrice, setThresholdPrice] = useState('');
   const [isSettingAlert, setIsSettingAlert] = useState(false);
 
-  useEffect(() => {
-    if (!productId) return;
-    setLoading(true);
-    axios.get(`${API_BASE_URL}/products/${productId}`)
-      .then(res => {
-        setData(res.data);
-      })
-      .catch(err => console.error(err))
-      .finally(() => setLoading(false));
+  const abortControllerRef = useRef(null);
+  const pollingTimerRef = useRef(null);
+  const isComponentMounted = useRef(true);
 
-    axios.get(`${API_BASE_URL}/products/${productId}/alerts`)
-      .then(res => setAlerts(res.data))
-      .catch(err => console.error(err));
-  }, [productId]);
+  const fetchProductData = useCallback(async (isSilentRefresh = false) => {
+    if (!productId || !isComponentMounted.current) return;
+    
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+
+    if (!isSilentRefresh) setLoading(true);
+
+    try {
+      const [productRes, alertsRes] = await Promise.all([
+        apiClient.get(`/products/${productId}`, { signal: abortControllerRef.current.signal }),
+        apiClient.get(`/products/${productId}/alerts`, { signal: abortControllerRef.current.signal })
+      ]);
+      
+      if (!isComponentMounted.current) return;
+
+      const productInfo = productRes.data.product;
+      setData(productRes.data);
+      setAlerts(alertsRes.data || []);
+      
+      // Notify parent App component for synchronized state across sidebar & metrics
+      if (onProductUpdated && productInfo) {
+        onProductUpdated(productInfo);
+      }
+      
+      // Handle Intelligent Polling for PENDING or SCRAPING statuses
+      const status = productInfo?.status;
+      if (status === 'PENDING' || status === 'SCRAPING') {
+        if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+        const pollInterval = status === 'PENDING' ? 3000 : 5000;
+        pollingTimerRef.current = setTimeout(() => {
+          if (document.visibilityState === 'visible') {
+            fetchProductData(true);
+          } else {
+            const resumePolling = () => {
+              if (document.visibilityState === 'visible') {
+                document.removeEventListener('visibilitychange', resumePolling);
+                fetchProductData(true);
+              }
+            };
+            document.addEventListener('visibilitychange', resumePolling);
+          }
+        }, pollInterval);
+      }
+      
+    } catch (err) {
+      if (axios.isCancel(err)) return;
+      if (!isComponentMounted.current) return;
+      console.error("Error loading product dashboard:", err);
+      if (!isSilentRefresh && (err.customType === 'network' || err.customType === 'timeout')) {
+        if (showToast) showToast(err.customMessage, 'error');
+      }
+    } finally {
+      if (isComponentMounted.current && !isSilentRefresh) setLoading(false);
+    }
+  }, [productId, onProductUpdated, showToast]);
+
+  useEffect(() => {
+    isComponentMounted.current = true;
+    fetchProductData();
+
+    return () => {
+      isComponentMounted.current = false;
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+    };
+  }, [fetchProductData]);
 
   const handleAddAlert = (e) => {
     e.preventDefault();
+    if (!phoneNumber || !thresholdPrice) return;
+    
     setIsSettingAlert(true);
-    axios.post(`${API_BASE_URL}/products/${productId}/alerts`, {
+    apiClient.post(`/products/${productId}/alerts`, {
       phone_number: phoneNumber,
       threshold_price: parseFloat(thresholdPrice)
     }).then(res => {
-      setAlerts([...alerts, res.data]);
+      setAlerts(prev => [...prev, res.data]);
       setPhoneNumber('');
       setThresholdPrice('');
-      setPhoneNumber('');
-      setThresholdPrice('');
-      if (showToast) showToast('Alert set successfully!', 'success');
+      if (showToast) showToast('Price alert set successfully.', 'success');
     }).catch(err => {
-      if (showToast) showToast(err.response?.data?.detail || 'Failed to set alert', 'error');
+      if (showToast) showToast(err.customMessage || 'Failed to set alert', 'error');
     }).finally(() => {
-      setIsSettingAlert(false);
+      if (isComponentMounted.current) setIsSettingAlert(false);
     });
   };
 
-  const handleDelete = () => {
-    if (!window.confirm("Are you sure you want to delete this product?")) return;
-    setIsDeleting(true);
-    axios.delete(`${API_BASE_URL}/products/${productId}`)
-      .then(() => {
-        if (onProductDeleted) onProductDeleted();
-      })
-      .catch(err => {
-        console.error("Failed to delete product:", err);
-        if (showToast) showToast("Failed to delete product", 'error');
-        setIsDeleting(false);
-      });
-  };
-
-  const handleRetry = () => {
-    setLoading(true);
-    axios.post(`${API_BASE_URL}/products/${productId}/retry`)
-      .then(() => {
-        // Refresh product data
-        return axios.get(`${API_BASE_URL}/products/${productId}`);
-      })
-      .then(res => setData(res.data))
-      .catch(err => {
-        console.error(err);
-        if (showToast) showToast(err.response?.data?.detail || "Failed to retry", 'error');
-      })
-      .finally(() => setLoading(false));
-  };
-
-  if (!productId) return <div className="lg:col-span-8 bg-white rounded-2xl shadow-sm border border-slate-200/80 p-8 text-center text-slate-500 italic h-[520px] flex items-center justify-center">Select a product to view its dashboard</div>;
-  if (loading) return (
-    <div className="lg:col-span-8 bg-white rounded-2xl shadow-sm border border-slate-200/80 p-6 lg:p-8 flex flex-col min-h-[520px] animate-pulse">
-      <div className="flex gap-4 mb-8">
-        <div className="w-20 h-20 bg-slate-200 rounded-lg shrink-0"></div>
-        <div className="flex-1 space-y-3 py-2">
-          <div className="h-6 bg-slate-200 rounded w-3/4"></div>
-          <div className="flex gap-2">
-            <div className="h-5 bg-slate-200 rounded w-16"></div>
-            <div className="h-5 bg-slate-200 rounded w-20"></div>
-          </div>
-          <div className="h-4 bg-slate-200 rounded w-1/2"></div>
-        </div>
-      </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <div className="h-20 bg-slate-200 rounded-xl"></div>
-        <div className="h-20 bg-slate-200 rounded-xl"></div>
-        <div className="h-20 bg-slate-200 rounded-xl"></div>
-        <div className="h-20 bg-slate-200 rounded-xl"></div>
-      </div>
-      <div className="flex-1 bg-slate-100 rounded-xl mt-4 min-h-[200px]"></div>
-    </div>
-  );
-  if (!data) return <div className="lg:col-span-8 bg-white rounded-2xl shadow-sm border border-slate-200/80 p-8 text-center text-rose-500 h-[520px] flex items-center justify-center">Error loading data</div>;
-
-  const chartData = data.history.map(snap => ({
-    date: new Date(snap.timestamp).toLocaleDateString(),
-    Price: snap.price,
-    MRP: snap.mrp_shown
-  }));
-
-  const getStatusBadge = (status) => {
-    switch (status) {
-      case 'PENDING': return <span className="bg-amber-50 border border-amber-100 text-amber-700 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">Pending</span>;
-      case 'SCRAPING': return <span className="bg-indigo-50 border border-indigo-100 text-indigo-700 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">Scraping...</span>;
-      case 'FAILED': return <span className="bg-rose-50 border border-rose-100 text-rose-700 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">Failed</span>;
-      case 'SUCCESS': return <span className="bg-emerald-50 border border-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">Success</span>;
-      default: return null;
+  const handleDeleteAlert = async (alertId) => {
+    try {
+      await apiClient.delete(`/alerts/${alertId}`);
+      setAlerts(prev => prev.filter(a => a.id !== alertId));
+      if (showToast) showToast('Alert removed.', 'info');
+    } catch (err) {
+      if (showToast) showToast('Failed to delete alert', 'error');
     }
   };
 
+  const handlePauseToggleStatus = (newStatus) => {
+    if (data && data.product) {
+      const updatedProduct = { ...data.product, status: newStatus };
+      setData(prev => ({ ...prev, product: updatedProduct }));
+      if (onProductUpdated) onProductUpdated(updatedProduct);
+    }
+  };
+
+  // Dark mode chart colors
+  const isDark = theme === 'dark';
+  const gridColor = isDark ? '#334155' : '#f1f5f9';
+  const axisColor = isDark ? '#64748b' : '#94a3b8';
+  const lineColor = isDark ? '#818cf8' : '#4f46e5';
+  const mrpLineColor = isDark ? '#64748b' : '#94a3b8';
+
+  if (!productId) {
+    return (
+      <EmptyState
+        title="No Product Selected"
+        description="Select a product from the sidebar list or track a new product URL above."
+        className="bg-white dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700/80 min-h-[400px]"
+      />
+    );
+  }
+
+  if (loading) {
+    return <ProductDetailsSkeleton />;
+  }
+
+  if (!data || !data.product) {
+    return (
+      <EmptyState
+        title="Product Not Found"
+        description="The requested product could not be loaded or was removed."
+        className="bg-white dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700/80 min-h-[400px]"
+      />
+    );
+  }
+
+  const { product, snapshots, statistics } = data;
+  const isFakeDiscount = product.fake_discount_detected;
+
   return (
-    <>
-      <div className="lg:col-span-8 bg-white rounded-2xl shadow-sm border border-slate-200/80 p-6 lg:p-8 flex flex-col min-h-[520px]">
-        <div className="flex flex-col md:flex-row md:justify-between md:items-start gap-4 mb-4 shrink-0">
-          <div className="flex gap-4 flex-1 min-w-0">
-            {data.product.image_url && (
-              <div className="w-20 h-20 shrink-0 rounded-lg overflow-hidden border border-slate-200 bg-white flex items-center justify-center p-1">
-                <img src={data.product.image_url} alt={data.product.title} className="w-full h-full object-contain" />
+    <div className="space-y-6">
+      {/* Top Details Card */}
+      <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm transition-colors">
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-700/60 pb-5">
+          <div className="flex items-start gap-4 flex-1">
+            {product.image_url && (
+              <div className="w-16 h-16 rounded-xl border border-slate-200 dark:border-slate-700 p-1 shrink-0 bg-white dark:bg-slate-900 flex items-center justify-center">
+                <img src={product.image_url} alt={product.title} className="w-full h-full object-contain" />
               </div>
             )}
-            <div className="flex-1 min-w-0">
-              <h2 className="text-2xl lg:text-3xl font-extrabold text-slate-900 m-0 flex items-center gap-2 truncate tracking-tight mb-3">
-                {data.product.title}
-              </h2>
-              <div className="flex flex-wrap gap-2 mb-3 items-center">
-                {getStatusBadge(data.product.status)}
-                {data.is_fake_discount && <span className="bg-rose-50 border border-rose-200 text-rose-700 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-1">⚠️ Fake Deal</span>}
-                {!data.is_fake_discount && data.product.status === 'SUCCESS' && <span className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-1">✅ Real Deal</span>}
-              </div>
-              <p className="text-slate-500 m-0 text-sm font-medium">Platform: <span className="text-slate-800">{data.product.platform.toUpperCase()}</span> • ID: <span className="text-slate-800">{data.product.product_id}</span></p>
-              
-              {data.history.length > 0 && (
-                <p className="text-slate-400 mt-2 text-xs font-medium">
-                  {(() => {
-                    const latest = data.history[data.history.length - 1];
-                    const diff = new Date() - new Date(latest.timestamp);
-                    const minutes = Math.floor(diff / 60000);
-                    const hours = Math.floor(minutes / 60);
-                    const days = Math.floor(hours / 24);
-                    if (days > 1) return `Updated ${days} days ago`;
-                    if (days === 1) return `Updated yesterday`;
-                    if (hours > 0) return `Updated ${hours} hour${hours > 1 ? 's' : ''} ago`;
-                    if (minutes > 0) return `Updated ${minutes} minute${minutes > 1 ? 's' : ''} ago`;
-                    return `Updated just now`;
-                  })()}
-                </p>
-              )}
-            </div>
-          </div>
-          <div className="flex flex-col gap-2 shrink-0">
-            {data.product.status === 'FAILED' && (
-              <button 
-                onClick={handleRetry} 
-                className="bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors w-full"
-              >
-                Retry Scrape
-              </button>
-            )}
-            <a 
-              href={`${API_BASE_URL}/products/${data.product.id}/export`}
-              download
-              className="bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors w-full text-center"
-            >
-              Export CSV
-            </a>
-            <button 
-              onClick={handleDelete} 
-              disabled={isDeleting}
-              className="bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 w-full"
-            >
-              {isDeleting ? 'Deleting...' : 'Delete Product'}
-            </button>
-          </div>
-        </div>
-        
-        {data.statistics && data.history.length > 0 && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 md:p-4">
-              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Current Price</div>
-              <div className="text-lg sm:text-2xl font-extrabold text-slate-900 truncate">₹{data.statistics.current_price}</div>
-            </div>
-            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 md:p-4">
-              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Lowest Ever</div>
-              <div className="text-lg sm:text-2xl font-extrabold text-emerald-600 truncate">₹{data.statistics.lowest_price}</div>
-            </div>
-            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 md:p-4">
-              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Average</div>
-              <div className="text-lg sm:text-2xl font-extrabold text-indigo-600 truncate">₹{data.statistics.average_price}</div>
-            </div>
-            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 md:p-4">
-              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Highest Ever</div>
-              <div className="text-lg sm:text-2xl font-extrabold text-rose-600 truncate">₹{data.statistics.highest_price}</div>
-            </div>
-          </div>
-        )}
-        
-        {data.deal_score && data.trend && data.history.length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-xl p-5 text-white flex justify-between items-center shadow-md">
-              <div>
-                <div className="text-indigo-100 text-sm font-bold uppercase tracking-wider mb-1">Deal Score</div>
-                <div className="text-3xl font-extrabold">{data.deal_score.deal_score} / 100</div>
-                <div className="text-sm font-medium mt-1">{data.deal_score.deal_reason}</div>
-              </div>
-              <div className="text-3xl tracking-widest">{data.deal_score.deal_rating}</div>
-            </div>
-            <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-center shadow-sm">
-              <div className="text-slate-500 text-sm font-bold uppercase tracking-wider mb-1">Recent Trend</div>
-              <div className="flex items-center gap-2 mb-1">
-                <span className={`text-xl font-extrabold ${data.trend.trend === 'DOWN' ? 'text-emerald-500' : data.trend.trend === 'UP' ? 'text-rose-500' : 'text-slate-700'}`}>
-                  {data.trend.trend === 'DOWN' ? 'Trending Down 📉' : data.trend.trend === 'UP' ? 'Trending Up 📈' : 'Stable Pricing ⚖️'}
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold px-2.5 py-0.5 rounded-md uppercase tracking-wider">
+                  {product.platform}
+                </span>
+                <span className={`text-xs font-bold px-2.5 py-0.5 rounded-md uppercase tracking-wider ${
+                  product.status === 'SUCCESS' ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/50' :
+                  product.status === 'PAUSED' ? 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-600' :
+                  product.status === 'FAILED' ? 'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-400 border border-rose-100 dark:border-rose-900/50' :
+                  'bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-400 border border-amber-100 dark:border-amber-900/50'
+                }`}>
+                  {product.status}
                 </span>
               </div>
-              <div className="text-slate-600 text-sm font-medium">{data.trend.explanation}</div>
+              <h2 className="text-xl font-bold text-slate-900 dark:text-slate-50 leading-snug">{product.title}</h2>
+              {product.brand && <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">Brand: {product.brand}</p>}
             </div>
           </div>
-        )}
-        
-        {data.history.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center p-10 text-center bg-slate-50 border border-slate-100 rounded-xl text-slate-500 min-h-0">
-            {data.product.status === 'FAILED' ? 'Scraping failed for this product. Check if the URL is valid.' : 'No price history available yet. The background scraper is fetching data...'}
-          </div>
-        ) : (
-          <div className="flex-1 w-full min-h-0 mt-4 flex flex-col">
-            <div className="flex-1 min-h-0">
-              <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dy={10} />
-                <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dx={-10} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)' }}
-                />
-                <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                <Line type="monotone" dataKey="Price" stroke="#4f46e5" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} activeDot={{r: 6}} />
-                <Line type="monotone" dataKey="MRP" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-            </div>
-            {data.history.length === 1 && (
-              <p className="text-center mt-3 text-sm text-slate-500 italic shrink-0">
-                Tracking started today. Historical line graph will build automatically as daily checks run.
-              </p>
-            )}
-          </div>
-        )}
-      </div>
 
-      {/* Alert Section */}
-      {data.product.status !== 'PENDING' && (
-      <div className="lg:col-span-12 bg-white rounded-2xl shadow-sm border border-slate-200 p-6 lg:p-8">
-        <h3 className="text-xl font-bold mb-6 text-slate-900 tracking-tight">WhatsApp Price Alerts</h3>
-        <div className="flex flex-col lg:flex-row gap-10">
-          <form onSubmit={handleAddAlert} className="flex flex-col gap-5 flex-1 min-w-[300px]">
-            <div>
-              <label className="block mb-1 font-semibold text-slate-700 text-sm">WhatsApp Number</label>
-              <p className="text-xs text-slate-500 mb-2">Include country code (+91 for India)</p>
-              <input 
-                type="text" 
-                value={phoneNumber} 
-                onChange={e => setPhoneNumber(e.target.value)} 
-                placeholder="+919876543210"
-                className="w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all shadow-sm"
-                required 
-              />
-            </div>
-            <div>
-              <label className="block mb-2 font-semibold text-slate-700 text-sm">Target Price (₹)</label>
-              <input 
-                type="number" 
-                value={thresholdPrice} 
-                onChange={e => setThresholdPrice(e.target.value)} 
-                placeholder="e.g. 50000"
-                className="w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all shadow-sm"
-                required 
-                min="1"
-              />
-            </div>
-            <button type="submit" disabled={isSettingAlert} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 px-4 rounded-xl transition-all shadow-md shadow-indigo-200 disabled:opacity-50 w-full mt-2">
-              {isSettingAlert ? 'Setting Alert...' : 'Set Alert'}
-            </button>
-          </form>
+          <div className="flex items-center gap-3">
+            <a 
+              href={product.url} 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="px-4 py-2 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-950/80 font-bold rounded-xl text-sm transition-colors flex items-center gap-1.5"
+            >
+              <span>Store Link</span>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+            </a>
 
-          <div className="flex-1 min-w-[300px]">
-            <h4 className="text-sm uppercase tracking-wider font-bold mb-4 text-slate-500">Active / Triggered Alerts</h4>
-            {alerts.length === 0 ? (
-              <div className="flex items-center justify-center h-full min-h-[150px] bg-white rounded-xl border border-slate-200 border-dashed">
-                <p className="text-slate-400 font-medium text-sm">No alerts set for this product.</p>
-              </div>
-            ) : (
-              <ul className="flex flex-col gap-3 m-0 p-0 list-none">
-                {alerts.map(a => (
-                  <li key={a.id} className="bg-white p-4 rounded-xl border border-slate-200 flex justify-between items-center shadow-sm">
-                    <div>
-                      <strong className="text-xl font-bold text-slate-800">₹{a.threshold_price}</strong>
-                      <div className="text-slate-500 text-sm mt-0.5 font-medium">{a.phone_number}</div>
-                    </div>
-                    {a.status === 'ACTIVE' && <span className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">Active</span>}
-                    {a.status === 'TRIGGERED' && <span className="bg-emerald-50 text-emerald-700 border border-emerald-100 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">Triggered</span>}
-                    {a.status === 'FAILED' && <span className="bg-rose-50 text-rose-700 border border-rose-100 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">Failed</span>}
-                  </li>
-                ))}
-              </ul>
-            )}
+            <ProductActionsMenu
+              product={product}
+              onRefresh={fetchProductData}
+              onDelete={onProductDeleted}
+              onPauseToggle={handlePauseToggleStatus}
+              showToast={showToast}
+            />
           </div>
         </div>
+
+        {/* Price & Fake Discount Banner */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-5">
+          <div className="bg-slate-50 dark:bg-slate-700/30 p-4 rounded-xl border border-slate-100 dark:border-slate-700/50">
+            <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">Current Selling Price</div>
+            <div className="text-2xl font-black text-slate-900 dark:text-slate-50">
+              {product.current_price ? `₹${product.current_price.toLocaleString()}` : 'N/A'}
+            </div>
+          </div>
+          <div className="bg-slate-50 dark:bg-slate-700/30 p-4 rounded-xl border border-slate-100 dark:border-slate-700/50">
+            <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">Listed MRP</div>
+            <div className="text-2xl font-black text-slate-600 dark:text-slate-400 line-through">
+              {product.mrp ? `₹${product.mrp.toLocaleString()}` : 'N/A'}
+            </div>
+          </div>
+          <div className="bg-slate-50 dark:bg-slate-700/30 p-4 rounded-xl border border-slate-100 dark:border-slate-700/50">
+            <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">Lowest Historical Price</div>
+            <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400">
+              {statistics?.lowest_price ? `₹${statistics.lowest_price.toLocaleString()}` : 'N/A'}
+            </div>
+          </div>
+          <div className="bg-slate-50 dark:bg-slate-700/30 p-4 rounded-xl border border-slate-100 dark:border-slate-700/50">
+            <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">Highest Historical Price</div>
+            <div className="text-2xl font-black text-slate-700 dark:text-slate-200">
+              {statistics?.highest_price ? `₹${statistics.highest_price.toLocaleString()}` : 'N/A'}
+            </div>
+          </div>
+        </div>
+
+        {/* Fake Discount Warning Badge */}
+        {isFakeDiscount && (
+          <div className="mt-5 p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/50 text-amber-800 dark:text-amber-300 flex items-start gap-3">
+            <div className="p-1 bg-amber-200 dark:bg-amber-900/60 rounded-lg text-amber-900 dark:text-amber-300 shrink-0 mt-0.5">⚠️</div>
+            <div>
+              <h4 className="font-bold text-sm">Potential Artificial MRP Inflation Detected</h4>
+              <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 leading-relaxed">
+                The displayed MRP appears inflated relative to historical baseline pricing to fabricate a steeper discount percentage.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
-      )}
-    </>
+
+      {/* Chart Section */}
+      <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm transition-colors">
+        <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4">Historical Price Trend</h3>
+        {snapshots && snapshots.length > 0 ? (
+          <div className="h-72 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={snapshots} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                <XAxis dataKey="timestamp" stroke={axisColor} fontSize={11} tickFormatter={(str) => str?.split('T')[0]} />
+                <YAxis stroke={axisColor} fontSize={11} domain={['auto', 'auto']} />
+                <RechartsTooltip content={<CustomTooltip />} />
+                <Legend wrapperStyle={{ color: isDark ? '#cbd5e1' : '#334155' }} />
+                <Line type="monotone" dataKey="price" name="Selling Price" stroke={lineColor} strokeWidth={3} dot={{ r: 3 }} activeDot={{ r: 6 }} />
+                <Line type="monotone" dataKey="mrp" name="MRP" stroke={mrpLineColor} strokeWidth={2} strokeDasharray="4 4" dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <EmptyState
+            title="No Price Snapshots Yet"
+            description="Historical snapshots will populate automatically as scraping tasks complete."
+            className="py-12"
+          />
+        )}
+      </div>
+
+      {/* Alert Configuration & Active Thresholds */}
+      <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm space-y-5 transition-colors">
+        <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Price Drop Alert Setup</h3>
+        
+        <form onSubmit={handleAddAlert} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <input
+            type="text"
+            placeholder="WhatsApp Phone (+91...)"
+            value={phoneNumber}
+            onChange={(e) => setPhoneNumber(e.target.value)}
+            className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
+            required
+          />
+          <input
+            type="number"
+            placeholder="Target Price Threshold (₹)"
+            value={thresholdPrice}
+            onChange={(e) => setThresholdPrice(e.target.value)}
+            className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
+            required
+          />
+          <button
+            type="submit"
+            disabled={isSettingAlert}
+            className="bg-indigo-600 dark:bg-indigo-500 hover:bg-indigo-700 dark:hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors disabled:opacity-50 shadow-md shadow-indigo-200 dark:shadow-none flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-slate-900"
+          >
+            {isSettingAlert ? (
+              <>
+                <svg className="w-4 h-4 animate-spin text-white" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                <span>Setting Alert...</span>
+              </>
+            ) : (
+              <span>🔔 Create Alert</span>
+            )}
+          </button>
+        </form>
+
+        {/* Existing Alerts Table */}
+        <div className="pt-3">
+          <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-3">Configured Alerts</h4>
+          {alerts.length === 0 ? (
+            <EmptyState
+              title="No Active Alerts"
+              description="Create a price threshold alert to receive WhatsApp notifications when prices drop."
+              className="py-8"
+            />
+          ) : (
+            <div className="overflow-x-auto border border-slate-100 dark:border-slate-700/60 rounded-xl">
+              <table className="w-full text-left text-sm text-slate-700 dark:text-slate-300">
+                <thead className="bg-slate-50 dark:bg-slate-700/40 text-xs font-bold text-slate-500 dark:text-slate-400 uppercase border-b border-slate-100 dark:border-slate-700/60">
+                  <tr>
+                    <th className="p-3">Phone Number</th>
+                    <th className="p-3">Target Price</th>
+                    <th className="p-3">Status</th>
+                    <th className="p-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700/40">
+                  {alerts.map(alert => (
+                    <tr key={alert.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
+                      <td className="p-3 font-semibold text-slate-800 dark:text-slate-100">{alert.phone_number}</td>
+                      <td className="p-3 font-bold text-indigo-600 dark:text-indigo-400">₹{alert.threshold_price?.toLocaleString()}</td>
+                      <td className="p-3">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                          alert.is_triggered ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/50' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400'
+                        }`}>
+                          {alert.is_triggered ? 'Triggered' : 'Active'}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right">
+                        <button
+                          onClick={() => handleDeleteAlert(alert.id)}
+                          className="text-xs font-bold text-rose-600 dark:text-rose-400 hover:text-rose-800 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/50 px-2.5 py-1 rounded-lg transition-colors"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

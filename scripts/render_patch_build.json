@@ -1,0 +1,7 @@
+{
+  "serviceDetails": {
+    "envSpecificDetails": {
+      "buildCommand": "pip install -r requirements.txt && playwright install chromium"
+    }
+  }
+}

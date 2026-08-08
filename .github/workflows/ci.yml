@@ -1,0 +1,123 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 bandit pip-audit -r requirements.txt
+
+      - name: Run Python Lint (flake8)
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Run Security Scan (Bandit)
+        run: |
+          bandit -r backend/ -ll
+
+      - name: Audit dependencies (pip-audit)
+        run: |
+          pip-audit --dry-run
+
+  tests-and-verification:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run unit tests (pytest)
+        run: |
+          python -m pytest
+
+      - name: Start FastAPI Backend in background
+        env:
+          DATABASE_URL: sqlite:///./price_tracker.db
+          CELERY_BROKER_URL: redis://localhost:6379/0
+          CELERY_RESULT_BACKEND: redis://localhost:6379/0
+          JWT_SECRET_KEY: 949f57d6e6a39a58b29c9b456bd84a7e289bf65db53049b49ab78c66e2c39e24
+          ACCESS_TOKEN_EXPIRE_MINUTES: 1440
+        run: |
+          python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
+          sleep 3
+
+      - name: Start Celery Worker in background
+        env:
+          DATABASE_URL: sqlite:///./price_tracker.db
+          CELERY_BROKER_URL: redis://localhost:6379/0
+          CELERY_RESULT_BACKEND: redis://localhost:6379/0
+        run: |
+          celery -A backend.celery_app:celery_app worker --loglevel=info --pool=solo &
+          sleep 3
+
+      - name: Run duplicates verification script
+        env:
+          BASE_URL: http://localhost:8000
+        run: |
+          python scripts/verify_duplicates.py
+
+      - name: Run isolation verification script
+        env:
+          BASE_URL: http://localhost:8000
+        run: |
+          python scripts/verify_isolation.py
+
+      - name: Run E2E verification script
+        run: |
+          python scripts/e2e_verify.py
+
+      - name: Run E2E regression script
+        env:
+          BASE_URL: http://localhost:8000
+        run: |
+          python scripts/e2e_regression.py
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build Backend Docker Image
+        run: |
+          docker build -t letsgo-backend:latest -f backend/Dockerfile .
+
+      - name: Build Frontend Docker Image
+        run: |
+          docker build -t letsgo-frontend:latest ./frontend
