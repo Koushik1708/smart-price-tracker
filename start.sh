@@ -2,7 +2,7 @@
 set -e
 
 echo "Starting Celery worker in background..."
-celery -A backend.celery_app:celery_app worker --loglevel=info --pool=solo -c 1 &
+celery -A backend.celery_app:celery_app worker --loglevel=info -Q scraper_queue --pool=solo -c 1 &
 WORKER_PID=$!
 
 # Brief pause to verify background worker process didn't exit immediately on startup failure

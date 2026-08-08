@@ -59,6 +59,7 @@ def schedule_scrape(
                 "trace_id": trace_id,
                 "parent_span_id": scheduler_span
             },
+            queue=settings.QUEUE_NAME,
             task_id=job_id,
             retry=True,
             retry_policy={
