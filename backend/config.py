@@ -31,8 +31,8 @@ class Settings:
     TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
     
     # Celery & Queue
-    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL") or "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND") or os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL") or "redis://localhost:6379/0"
     CELERY_CONCURRENCY = int(os.getenv("CELERY_CONCURRENCY", "4"))
     QUEUE_NAME = os.getenv("QUEUE_NAME", "scraper_queue")
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
