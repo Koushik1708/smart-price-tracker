@@ -40,6 +40,50 @@ if sys.platform == "win32" and sys.version_info < (3, 8):
 from backend import models
 Base.metadata.create_all(bind=engine)
 
+def run_db_migrations():
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        if not inspector.has_table("products"):
+            return
+            
+        columns_users = [col['name'] for col in inspector.get_columns("users")] if inspector.has_table("users") else []
+        columns_products = [col['name'] for col in inspector.get_columns("products")] if inspector.has_table("products") else []
+        columns_alerts = [col['name'] for col in inspector.get_columns("alert_thresholds")] if inspector.has_table("alert_thresholds") else []
+        
+        is_postgres = "postgresql" in str(engine.url)
+        bool_false = "FALSE" if is_postgres else "0"
+        dt_type = "TIMESTAMP" if is_postgres else "DATETIME"
+        
+        with engine.begin() as conn:
+            if columns_users and 'is_admin' not in columns_users:
+                conn.execute(text(f"ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT {bool_false};"))
+            if columns_users and 'failed_login_attempts' not in columns_users:
+                conn.execute(text("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0;"))
+            if columns_users and 'locked_until' not in columns_users:
+                conn.execute(text(f"ALTER TABLE users ADD COLUMN locked_until {dt_type};"))
+
+            if 'image_url' not in columns_products:
+                conn.execute(text("ALTER TABLE products ADD COLUMN image_url VARCHAR;"))
+            if 'brand' not in columns_products:
+                conn.execute(text("ALTER TABLE products ADD COLUMN brand VARCHAR;"))
+            if 'category' not in columns_products:
+                conn.execute(text("ALTER TABLE products ADD COLUMN category VARCHAR;"))
+            if 'retry_count' not in columns_products:
+                conn.execute(text("ALTER TABLE products ADD COLUMN retry_count INTEGER DEFAULT 0;"))
+            if 'last_failure' not in columns_products:
+                conn.execute(text(f"ALTER TABLE products ADD COLUMN last_failure {dt_type};"))
+            if 'last_failure_reason' not in columns_products:
+                conn.execute(text("ALTER TABLE products ADD COLUMN last_failure_reason VARCHAR;"))
+            if 'user_id' not in columns_products:
+                conn.execute(text("ALTER TABLE products ADD COLUMN user_id INTEGER;"))
+            if columns_alerts and 'user_id' not in columns_alerts:
+                conn.execute(text("ALTER TABLE alert_thresholds ADD COLUMN user_id INTEGER;"))
+    except Exception as e:
+        logger.warning(f"Schema migration skipped or failed: {e}")
+
+run_db_migrations()
+
 app = FastAPI(
     title="Price History & Fake-Discount Tracker Enterprise API",
     description="Enterprise-grade pricing tracker, fake-discount detector, and administrative governance system.",
