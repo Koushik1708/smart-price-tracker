@@ -32,9 +32,17 @@ celery_app.conf.update(
     
     # Task routing if needed later
     task_routes={
-        "backend.services.worker.execute_job_task": {"queue": settings.QUEUE_NAME}
+        "backend.services.worker.execute_job": {"queue": settings.QUEUE_NAME}
     }
 )
+
+if settings.CELERY_BROKER_URL.startswith("rediss://"):
+    import ssl
+    celery_app.conf.update(
+        broker_use_ssl={'ssl_cert_reqs': ssl.CERT_REQUIRED},
+        redis_backend_use_ssl={'ssl_cert_reqs': ssl.CERT_REQUIRED},
+    )
+
 
 from celery.signals import worker_process_init
 from backend.database import engine
