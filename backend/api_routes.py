@@ -125,7 +125,10 @@ def get_ready(db: Session = Depends(get_db)):
     try:
         import redis
         broker_url = settings.CELERY_BROKER_URL.strip()
-        r = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
+        kwargs = {"socket_connect_timeout": 5.0, "socket_timeout": 5.0}
+        if broker_url.startswith("rediss://") and "ssl_cert_reqs" not in broker_url:
+            kwargs["ssl_cert_reqs"] = "none"
+        r = redis.Redis.from_url(broker_url, **kwargs)
         r.ping()
     except Exception:
         raise HTTPException(status_code=503, detail="Redis broker not ready")
@@ -169,7 +172,10 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
     try:
         import redis
         broker_url = settings.CELERY_BROKER_URL.strip()
-        r = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
+        kwargs = {"socket_connect_timeout": 5.0, "socket_timeout": 5.0}
+        if broker_url.startswith("rediss://") and "ssl_cert_reqs" not in broker_url:
+            kwargs["ssl_cert_reqs"] = "none"
+        r = redis.Redis.from_url(broker_url, **kwargs)
         r.ping()
         health_status["redis"] = "healthy"
     except Exception as e:
@@ -181,7 +187,10 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
     try:
         import redis
         broker_url = settings.CELERY_BROKER_URL.strip()
-        r_celery = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
+        kwargs = {"socket_connect_timeout": 5.0, "socket_timeout": 5.0}
+        if broker_url.startswith("rediss://") and "ssl_cert_reqs" not in broker_url:
+            kwargs["ssl_cert_reqs"] = "none"
+        r_celery = redis.Redis.from_url(broker_url, **kwargs)
         r_celery.ping()
         health_status["celery"] = "healthy"
     except Exception as e:

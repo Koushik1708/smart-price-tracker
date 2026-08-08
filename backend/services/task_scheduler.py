@@ -33,7 +33,10 @@ def schedule_scrape(
         import redis
         from backend.config import settings
         broker_url = settings.CELERY_BROKER_URL.strip()
-        r = redis.Redis.from_url(broker_url, socket_timeout=5.0, socket_connect_timeout=5.0)
+        kwargs = {"socket_connect_timeout": 5.0, "socket_timeout": 5.0}
+        if broker_url.startswith("rediss://") and "ssl_cert_reqs" not in broker_url:
+            kwargs["ssl_cert_reqs"] = "none"
+        r = redis.Redis.from_url(broker_url, **kwargs)
         r.ping()
     except Exception as e:
         logger.error(f"Redis ping failed: {e}", exc_info=True, extra={
