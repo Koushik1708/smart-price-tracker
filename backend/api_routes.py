@@ -172,8 +172,9 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
         r = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
         r.ping()
         health_status["redis"] = "healthy"
-    except Exception:
+    except Exception as e:
         health_status["redis"] = "unhealthy"
+        health_status["redis_error"] = f"{type(e).__name__}: {str(e)}"
         critical_failures.append("redis")
 
     # 3. Check Celery Worker (critical)
@@ -183,8 +184,9 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
         r_celery = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
         r_celery.ping()
         health_status["celery"] = "healthy"
-    except Exception:
+    except Exception as e:
         health_status["celery"] = "unhealthy"
+        health_status["celery_error"] = f"{type(e).__name__}: {str(e)}"
         critical_failures.append("celery")
 
     degraded_reasons = []
