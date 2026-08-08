@@ -124,7 +124,8 @@ def get_ready(db: Session = Depends(get_db)):
     # Redis
     try:
         import redis
-        r = redis.Redis.from_url(settings.CELERY_BROKER_URL, socket_connect_timeout=2)
+        broker_url = settings.CELERY_BROKER_URL.strip()
+        r = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
         r.ping()
     except Exception:
         raise HTTPException(status_code=503, detail="Redis broker not ready")
@@ -167,7 +168,8 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
     # 2. Check Redis (critical)
     try:
         import redis
-        r = redis.Redis.from_url(settings.CELERY_BROKER_URL, socket_connect_timeout=2)
+        broker_url = settings.CELERY_BROKER_URL.strip()
+        r = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
         r.ping()
         health_status["redis"] = "healthy"
     except Exception:
@@ -177,7 +179,8 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
     # 3. Check Celery Worker (critical)
     try:
         import redis
-        r_celery = redis.Redis.from_url(settings.CELERY_BROKER_URL, socket_connect_timeout=1.0)
+        broker_url = settings.CELERY_BROKER_URL.strip()
+        r_celery = redis.Redis.from_url(broker_url, socket_connect_timeout=5.0, socket_timeout=5.0)
         r_celery.ping()
         health_status["celery"] = "healthy"
     except Exception:
