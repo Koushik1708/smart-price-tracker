@@ -511,10 +511,30 @@ def get_product(product_id: int, current_user: User = Depends(get_current_user),
     statistics = calculate_statistics(snapshots)
     trend = analyze_trend(snapshots)
     deal_score = calculate_deal_score(product, snapshots, is_fake_discount)
+
+    latest = snapshots[-1] if snapshots else None
+    prod_dict = {
+        "id": product.id,
+        "user_id": product.user_id,
+        "url": product.url,
+        "title": product.title,
+        "platform": product.platform,
+        "product_id": product.product_id,
+        "status": product.status,
+        "image_url": product.image_url,
+        "brand": product.brand,
+        "category": product.category,
+        "retry_count": product.retry_count,
+        "last_failure": product.last_failure,
+        "last_failure_reason": product.last_failure_reason,
+        "current_price": latest.price if latest else None,
+        "mrp": latest.mrp_shown if latest else None,
+    }
         
     return {
-        "product": product,
+        "product": prod_dict,
         "history": snapshots,
+        "snapshots": snapshots,
         "is_fake_discount": is_fake_discount,
         "statistics": statistics,
         "trend": trend,
@@ -593,8 +613,30 @@ def search_products(
     
     products = query.order_by(Product.id.desc()).offset(skip).limit(page_size).all()
     
+    product_list = []
+    for p in products:
+        latest = db.query(PriceSnapshot).filter(PriceSnapshot.product_id == p.id).order_by(PriceSnapshot.timestamp.desc()).first()
+        prod_dict = {
+            "id": p.id,
+            "user_id": p.user_id,
+            "url": p.url,
+            "title": p.title,
+            "platform": p.platform,
+            "product_id": p.product_id,
+            "status": p.status,
+            "image_url": p.image_url,
+            "brand": p.brand,
+            "category": p.category,
+            "retry_count": p.retry_count,
+            "last_failure": p.last_failure,
+            "last_failure_reason": p.last_failure_reason,
+            "current_price": latest.price if latest else None,
+            "mrp": latest.mrp_shown if latest else None,
+        }
+        product_list.append(prod_dict)
+
     return {
-        "products": products,
+        "products": product_list,
         "pagination": {
             "current_page": page,
             "page_size": page_size,

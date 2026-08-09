@@ -243,6 +243,21 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 def get_prometheus_metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+@app.on_event("startup")
+def start_inprocess_worker():
+    if os.getenv("ENABLE_INPROCESS_WORKER", "true").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
+        import threading
+        import subprocess
+        def _start_worker():
+            try:
+                logger.info("Starting in-process Celery worker thread...")
+                subprocess.run([sys.executable, "-m", "celery", "-A", "backend.celery_app:celery_app", "worker", "--loglevel=info", "-Q", settings.QUEUE_NAME, "--pool=solo", "-c", "1"])
+            except Exception as e:
+                logger.error(f"In-process Celery worker thread failed: {e}")
+                
+        worker_thread = threading.Thread(target=_start_worker, daemon=True)
+        worker_thread.start()
+
 @app.get("/")
 def read_root():
     return {"status": "ok"}

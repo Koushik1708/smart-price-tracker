@@ -189,8 +189,13 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
     );
   }
 
-  const { product, snapshots, statistics } = data;
+  const { product, statistics } = data;
+  const snapshots = data.snapshots || data.history || [];
   const isFakeDiscount = product.fake_discount_detected;
+
+  const latestSnapshot = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
+  const currentSellingPrice = product.current_price ?? statistics?.current_price ?? (latestSnapshot ? latestSnapshot.price : null);
+  const listedMrp = product.mrp ?? (latestSnapshot ? latestSnapshot.mrp_shown : null);
 
   return (
     <div className="space-y-6">
@@ -248,13 +253,13 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
           <div className="bg-slate-50 dark:bg-slate-700/30 p-4 rounded-xl border border-slate-100 dark:border-slate-700/50">
             <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">Current Selling Price</div>
             <div className="text-2xl font-black text-slate-900 dark:text-slate-50">
-              {product.current_price ? `₹${product.current_price.toLocaleString()}` : 'N/A'}
+              {currentSellingPrice ? `₹${currentSellingPrice.toLocaleString()}` : 'N/A'}
             </div>
           </div>
           <div className="bg-slate-50 dark:bg-slate-700/30 p-4 rounded-xl border border-slate-100 dark:border-slate-700/50">
             <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">Listed MRP</div>
             <div className="text-2xl font-black text-slate-600 dark:text-slate-400 line-through">
-              {product.mrp ? `₹${product.mrp.toLocaleString()}` : 'N/A'}
+              {listedMrp ? `₹${listedMrp.toLocaleString()}` : 'N/A'}
             </div>
           </div>
           <div className="bg-slate-50 dark:bg-slate-700/30 p-4 rounded-xl border border-slate-100 dark:border-slate-700/50">
@@ -270,6 +275,19 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
             </div>
           </div>
         </div>
+
+        {/* Failed Scrape Warning Banner */}
+        {product.status === 'FAILED' && (
+          <div className="mt-5 p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 text-rose-800 dark:text-rose-300 flex items-start gap-3">
+            <div className="p-1 bg-rose-200 dark:bg-rose-900/60 rounded-lg text-rose-900 dark:text-rose-300 shrink-0 mt-0.5">⚠️</div>
+            <div>
+              <h4 className="font-bold text-sm">Product Scrape Failed</h4>
+              <p className="text-xs text-rose-700 dark:text-rose-400 mt-0.5 leading-relaxed">
+                {product.last_failure_reason || "Retailer automated access blocked or extraction failed. Retry tracking from the actions menu."}
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Fake Discount Warning Badge */}
         {isFakeDiscount && (
