@@ -6,7 +6,7 @@ python -m celery -A backend.celery_app:celery_app worker --loglevel=info -Q scra
 WORKER_PID=$!
 
 # Brief pause to verify background worker process didn't exit immediately on startup failure
-sleep 2
+sleep 5
 if ! kill -0 $WORKER_PID 2>/dev/null; then
     echo "ERROR: Celery worker process failed to start."
     exit 1

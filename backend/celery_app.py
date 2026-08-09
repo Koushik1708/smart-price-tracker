@@ -14,10 +14,10 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
     task_track_started=True,
-    broker_connection_retry_on_startup=False,
-    broker_connection_timeout=2.0,
+    broker_connection_retry_on_startup=True,
+    broker_connection_timeout=10.0,
     broker_connection_retry=True,
-    broker_connection_max_retries=2,
+    broker_connection_max_retries=5,
     broker_transport_options={'visibility_timeout': int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "3600"))},
     
     task_time_limit=settings.PLAYWRIGHT_TIMEOUT // 1000 + 30,  # e.g., 90s
