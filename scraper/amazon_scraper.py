@@ -5,7 +5,68 @@ import logging
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 class AmazonScraper(BaseScraper):
+    def _fast_http_fetch(self, url: str) -> Dict[str, Any]:
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, "html.parser")
+                title_elem = soup.select_one("#productTitle")
+                price_elem = soup.select_one(".a-price-whole")
+                if title_elem and price_elem:
+                    title = title_elem.get_text(strip=True)
+                    price_text = price_elem.get_text(strip=True).replace(",", "").rstrip(".").strip()
+                    price = float(price_text)
+                    
+                    mrp_elem = soup.select_one(".a-text-price .a-offscreen")
+                    if mrp_elem:
+                        mrp_text = mrp_elem.get_text(strip=True).replace("₹", "").replace(",", "").strip()
+                        mrp = float(mrp_text)
+                    else:
+                        mrp = price
+                        
+                    asin = url.split("/dp/")[1].split("/")[0].split("?")[0] if "/dp/" in url else "unknown_asin"
+                    
+                    img_elem = soup.select_one("#landingImage")
+                    image_url = img_elem.get("src") if img_elem else None
+                    
+                    brand_elem = soup.select_one("#bylineInfo")
+                    brand = brand_elem.get_text(strip=True) if brand_elem else None
+                    if brand and brand.startswith("Brand:"):
+                        brand = brand.replace("Brand:", "").strip()
+                    elif brand and brand.startswith("Visit the"):
+                        brand = brand.replace("Visit the", "").replace("Store", "").strip()
+
+                    cat_elem = soup.select_one("#wayfinding-breadcrumbs_container")
+                    category = cat_elem.get_text(separator=" > ", strip=True) if cat_elem else None
+
+                    logging.info(f"Fast HTTP fetch succeeded for {url}")
+                    return {
+                        "product_id": asin,
+                        "current_price": price,
+                        "mrp_shown": mrp,
+                        "title": title,
+                        "platform": "amazon",
+                        "image_url": image_url,
+                        "brand": brand,
+                        "category": category
+                    }
+        except Exception as e:
+            logging.info(f"Fast HTTP fetch skipped for {url}: {e}")
+        return None
+
     async def fetch_product_data(self, url: str) -> Dict[str, Any]:
+        # Try fast lightweight HTTP fetch first to save RAM and avoid Chromium OOM
+        fast_data = self._fast_http_fetch(url)
+        if fast_data:
+            return fast_data
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
