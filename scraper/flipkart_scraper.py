@@ -8,7 +8,11 @@ import re
 class FlipkartScraper(BaseScraper):
     async def fetch_product_data(self, url: str) -> Dict[str, Any]:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, timeout=30000)
+            browser = await p.chromium.launch(
+                headless=True,
+                timeout=30000,
+                args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
+            )
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
             )
