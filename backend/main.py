@@ -257,15 +257,18 @@ def reconcile_stale_products():
 
 @app.on_event("startup")
 def start_inprocess_worker():
-    if os.getenv("ENABLE_INPROCESS_WORKER", "false").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
+    should_start = os.getenv("ENABLE_INPROCESS_WORKER", "false").lower() in ["true", "1", "yes"]
+    is_render_without_start_sh = os.getenv("RENDER") == "true" and os.getenv("IS_EXTERNAL_WORKER") != "true"
+    
+    if (should_start or is_render_without_start_sh) and "celery" not in sys.argv[0]:
         import threading
         import subprocess
         def _start_worker():
             try:
-                logger.info("Starting in-process Celery worker thread...")
+                logger.info("Starting production Celery worker process...")
                 subprocess.run([sys.executable, "-m", "celery", "-A", "backend.celery_app:celery_app", "worker", "--loglevel=info", "-Q", settings.QUEUE_NAME, "--pool=solo", "-c", "1"])
             except Exception as e:
-                logger.error(f"In-process Celery worker thread failed: {e}")
+                logger.error(f"Celery worker process failed: {e}")
                 
         worker_thread = threading.Thread(target=_start_worker, daemon=True)
         worker_thread.start()

@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+export IS_EXTERNAL_WORKER="true"
+
 echo "Starting Celery worker in background..."
 python -m celery -A backend.celery_app:celery_app worker --loglevel=info -Q scraper_queue --pool=solo -c 1 &
 WORKER_PID=$!
