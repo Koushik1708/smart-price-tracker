@@ -245,7 +245,7 @@ def get_prometheus_metrics():
 
 @app.on_event("startup")
 def start_inprocess_worker():
-    if os.getenv("ENABLE_INPROCESS_WORKER", "false").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
+    if os.getenv("ENABLE_INPROCESS_WORKER", "true").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
         import threading
         import subprocess
         def _start_worker():
