@@ -140,7 +140,7 @@ def get_price_drops(current_user: User = Depends(get_current_user), db: Session 
         r.prev_price as previous_price, 
         r.price as current_price, 
         (r.prev_price - r.price) as savings, 
-        ROUND(((r.prev_price - r.price) / r.prev_price * 100), 2) as savings_percent, 
+        ROUND(CAST(((r.prev_price - r.price) / r.prev_price * 100) AS NUMERIC), 2) as savings_percent, 
         r.timestamp
     FROM RankedSnapshots r
     JOIN products p ON r.product_id = p.id
@@ -159,21 +159,33 @@ def get_recent_products(current_user: User = Depends(get_current_user), db: Sess
     # Since we can't easily coalesce a child table in a fast ORM query without joining,
     # let's write a SQL query to get the greatest of last_failure and max snapshot timestamp
     query = """
-    WITH LastSnap AS (
-        SELECT product_id, MAX(timestamp) as last_snap_time, price
+    WITH RankedSnapshots AS (
+        SELECT 
+            product_id,
+            price,
+            timestamp as last_snap_time,
+            ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY timestamp DESC) as rn
         FROM price_snapshots
-        GROUP BY product_id
+    ),
+    LastSnap AS (
+        SELECT product_id, price, last_snap_time
+        FROM RankedSnapshots
+        WHERE rn = 1
     )
     SELECT 
         p.id, p.image_url as image, p.title, 
         COALESCE(ls.price, 0) as current_price,
         p.status,
-        COALESCE(MAX(ls.last_snap_time, p.last_failure), ls.last_snap_time, p.last_failure) as last_checked
+        CASE 
+            WHEN ls.last_snap_time IS NOT NULL AND p.last_failure IS NOT NULL THEN
+                CASE WHEN ls.last_snap_time >= p.last_failure THEN ls.last_snap_time ELSE p.last_failure END
+            ELSE COALESCE(ls.last_snap_time, p.last_failure)
+        END as last_checked
     FROM products p
     LEFT JOIN LastSnap ls ON p.id = ls.product_id
     WHERE p.user_id = :user_id
     ORDER BY last_checked DESC NULLS LAST
-    LIMIT 10
+    LIMIT 10;
     """
     
     results = db.execute(text(query), {"user_id": current_user.id}).fetchall()
