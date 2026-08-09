@@ -245,18 +245,34 @@ def get_prometheus_metrics():
 
 @app.on_event("startup")
 def start_inprocess_worker():
-    if os.getenv("ENABLE_INPROCESS_WORKER", "false").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
-        import threading
-        import subprocess
-        def _start_worker():
-            try:
-                logger.info("Starting in-process Celery worker thread...")
-                subprocess.run([sys.executable, "-m", "celery", "-A", "backend.celery_app:celery_app", "worker", "--loglevel=info", "-Q", settings.QUEUE_NAME, "--pool=solo", "-c", "1"])
-            except Exception as e:
-                logger.error(f"In-process Celery worker thread failed: {e}")
-                
-        worker_thread = threading.Thread(target=_start_worker, daemon=True)
-        worker_thread.start()
+    if os.getenv("ENABLE_INPROCESS_WORKER", "true").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
+        import psutil
+        is_worker_running = False
+        try:
+            current_pid = os.getpid()
+            for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                if p.info['pid'] != current_pid:
+                    cmd = ' '.join(p.info.get('cmdline') or []).lower()
+                    if 'celery' in cmd and 'worker' in cmd:
+                        is_worker_running = True
+                        break
+        except Exception as e:
+            logger.warning(f"Could not inspect running processes for Celery deduplication: {e}")
+
+        if not is_worker_running:
+            import threading
+            import subprocess
+            def _start_worker():
+                try:
+                    logger.info("Starting single in-process Celery worker thread...")
+                    subprocess.run([sys.executable, "-m", "celery", "-A", "backend.celery_app:celery_app", "worker", "--loglevel=info", "-Q", settings.QUEUE_NAME, "--pool=solo", "-c", "1"])
+                except Exception as e:
+                    logger.error(f"In-process Celery worker thread failed: {e}")
+                    
+            worker_thread = threading.Thread(target=_start_worker, daemon=True)
+            worker_thread.start()
+        else:
+            logger.info("External Celery worker process detected; skipping duplicate in-process worker thread.")
 
 @app.get("/")
 def read_root():
