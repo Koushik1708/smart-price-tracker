@@ -244,8 +244,20 @@ def get_prometheus_metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.on_event("startup")
+def reconcile_stale_products():
+    try:
+        from backend.database import engine
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE products SET status = 'FAILED', last_failure_reason = 'Scrape task interrupted by worker process termination' WHERE status = 'SCRAPING'"
+            ))
+    except Exception as e:
+        logger.warning(f"Stale product status reconciliation failed: {e}")
+
+@app.on_event("startup")
 def start_inprocess_worker():
-    if os.getenv("ENABLE_INPROCESS_WORKER", "true").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
+    if os.getenv("ENABLE_INPROCESS_WORKER", "false").lower() in ["true", "1", "yes"] and "celery" not in sys.argv[0]:
         import threading
         import subprocess
         def _start_worker():

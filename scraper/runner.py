@@ -177,8 +177,12 @@ async def _async_scrape_single_product(product_id: int):
         product.last_failure = datetime.datetime.utcnow()
         product.last_failure_reason = reason
     finally:
-        db.commit()
-        db.close()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
         process_time = time.time() - start_time
         logger.info(f"Finished scraping {product_id}", extra={"product_id": product_id, "processing_time": f"{process_time:.4f}s"})
 
