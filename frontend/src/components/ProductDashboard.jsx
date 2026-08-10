@@ -144,7 +144,13 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
       setPhoneNumber('');
       setThresholdPrice('');
       setTelegramChatId('');
-      if (showToast) showToast('Price alert set successfully.', 'success');
+      if (showToast) {
+        if (res.data.confirmation_sent) {
+          showToast('Price alert active & confirmation message sent!', 'success');
+        } else {
+          showToast('Price alert active in database. (Confirmation delivery pending or provider unconfigured)', 'info');
+        }
+      }
     }).catch(err => {
       if (showToast) showToast(err.customMessage || 'Failed to set alert', 'error');
     }).finally(() => {

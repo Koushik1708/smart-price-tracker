@@ -117,3 +117,44 @@ def get_notifier(channel: str) -> NotificationProvider:
         return TelegramProvider()
     else:
         raise ValueError(f"Unsupported notification channel: '{channel}'. Supported: {SUPPORTED_CHANNELS}")
+
+def build_alert_confirmation_message(
+    product_title: str,
+    platform: str,
+    threshold_price: float,
+    current_price: float = None,
+    channel: str = "telegram"
+) -> str:
+    """Builds a centralized alert confirmation message for Telegram or WhatsApp."""
+    platform_name = (platform or "Retailer").capitalize()
+    if current_price is not None and current_price > 0:
+        price_str = f"₹{current_price:,.2f}"
+    else:
+        price_str = "Not available yet"
+
+    if channel == "telegram":
+        import html
+        safe_title = html.escape(product_title or "Product")
+        safe_platform = html.escape(platform_name)
+        return (
+            "🔔 <b>Smart Price Tracker</b>\n\n"
+            "<b>Alert Created Successfully</b>\n\n"
+            f"📦 <b>Product:</b> {safe_title}\n"
+            f"🏪 <b>Platform:</b> {safe_platform}\n"
+            f"🎯 <b>Target Price:</b> ₹{threshold_price:,.2f}\n\n"
+            f"<b>Current Price:</b> {price_str}\n"
+            "<b>Status:</b> ✅ Active\n\n"
+            "You will receive a Telegram notification when the product price reaches or falls below your target price."
+        )
+    else:
+        return (
+            "🔔 *Smart Price Tracker*\n\n"
+            "*Alert Created Successfully*\n\n"
+            f"📦 *Product:* {product_title}\n"
+            f"🏪 *Platform:* {platform_name}\n"
+            f"🎯 *Target Price:* ₹{threshold_price:,.2f}\n\n"
+            f"*Current Price:* {price_str}\n"
+            "*Status:* ✅ Active\n\n"
+            "You will receive a WhatsApp notification when the product price reaches or falls below your target price."
+        )
+

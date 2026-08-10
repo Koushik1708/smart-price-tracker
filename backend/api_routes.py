@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from backend.database import get_db
-from backend.notifications import TwilioSandboxProvider, get_notifier, SUPPORTED_CHANNELS
+from backend.notifications import TwilioSandboxProvider, get_notifier, SUPPORTED_CHANNELS, build_alert_confirmation_message
 from backend.auth import get_current_user
 from backend.models import User, Product, PriceSnapshot, AlertThreshold
 from backend.services.task_scheduler import schedule_scrape
@@ -728,6 +728,29 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
         details={"alert_id": new_alert.id, "product_id": product.id, "threshold": alert.threshold_price, "channel": channel},
         request=request
     )
+    
+    # Send immediate alert creation confirmation AFTER database commit
+    confirmation_sent = False
+    try:
+        latest_snapshot = db.query(PriceSnapshot).filter(PriceSnapshot.product_id == product.id).order_by(PriceSnapshot.timestamp.desc()).first()
+        current_price = latest_snapshot.price if latest_snapshot else None
+        
+        confirmation_msg = build_alert_confirmation_message(
+            product_title=product.title,
+            platform=product.platform,
+            threshold_price=alert.threshold_price,
+            current_price=current_price,
+            channel=channel
+        )
+        
+        destination = new_alert.telegram_chat_id if channel == "telegram" else new_alert.phone_number
+        notifier = get_notifier(channel)
+        confirmation_sent = notifier.send_alert(destination, confirmation_msg)
+        if not confirmation_sent:
+            logger.warning(f"Confirmation delivery failed or provider unconfigured for {channel} alert {new_alert.id}.")
+    except Exception as notify_err:
+        logger.warning(f"Failed to send confirmation message for alert {new_alert.id} ({channel}): {notify_err}")
+
     return {
         "id": new_alert.id,
         "product_id": new_alert.product_id,
@@ -737,7 +760,8 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
         "status": new_alert.status,
         "is_triggered": new_alert.status == "TRIGGERED",
         "notification_channel": new_alert.notification_channel,
-        "telegram_chat_id": new_alert.telegram_chat_id
+        "telegram_chat_id": new_alert.telegram_chat_id,
+        "confirmation_sent": confirmation_sent
     }
 
 @router.get("/products/{product_id}/alerts")

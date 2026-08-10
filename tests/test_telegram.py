@@ -273,3 +273,146 @@ class TestSupportedChannels:
     def test_supported_channels_no_extras(self):
         from backend.notifications import SUPPORTED_CHANNELS
         assert len(SUPPORTED_CHANNELS) == 2
+
+
+# --------------------------------------------------------------------------- #
+# 5. Phase 6.1 Alert Creation Confirmation Tests
+# --------------------------------------------------------------------------- #
+
+class TestAlertConfirmation:
+    """Tests for Phase 6.1 immediate alert confirmation delivery."""
+
+    def test_build_alert_confirmation_message_telegram(self):
+        """Message builder formats HTML confirmation message for Telegram."""
+        from backend.notifications import build_alert_confirmation_message
+
+        msg = build_alert_confirmation_message(
+            product_title="Sony WH-1000XM5",
+            platform="amazon",
+            threshold_price=20000.0,
+            current_price=24999.0,
+            channel="telegram"
+        )
+        assert "Sony WH-1000XM5" in msg
+        assert "₹20,000.00" in msg
+        assert "Amazon" in msg
+        assert "₹24,999.00" in msg
+        assert "Telegram" in msg
+
+    def test_build_alert_confirmation_message_no_price(self):
+        """Message builder handles missing current_price with fallback."""
+        from backend.notifications import build_alert_confirmation_message
+
+        msg = build_alert_confirmation_message(
+            product_title="Logitech MX Master 3S",
+            platform="flipkart",
+            threshold_price=5000.0,
+            current_price=None,
+            channel="telegram"
+        )
+        assert "Not available yet" in msg
+        assert "Logitech MX Master 3S" in msg
+        assert "₹5,000.00" in msg
+
+    @patch("backend.api_routes.get_notifier")
+    def test_create_alert_sends_telegram_confirmation(self, mock_get_notifier):
+        """create_alert() sends immediate Telegram confirmation to chat ID after DB commit."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, Product, AlertThreshold
+        from backend.api_routes import create_alert, AlertCreate
+        from unittest.mock import MagicMock
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            # Create user & product
+            email = f"confirm_{uuid.uuid4().hex[:6]}@example.com"
+            user = User(name="Test User", email=email, password_hash="hash")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            prod = Product(user_id=user.id, url=f"https://www.amazon.in/dp/B0{uuid.uuid4().hex[:6]}", title="Test Headphones", platform="amazon")
+            db.add(prod)
+            db.commit()
+            db.refresh(prod)
+
+            mock_notifier = MagicMock()
+            mock_notifier.send_alert.return_value = True
+            mock_get_notifier.return_value = mock_notifier
+
+            mock_req = Request({"type": "http", "path": "/products/1/alerts", "client": ("127.0.0.1", 12345), "headers": []})
+
+            payload = AlertCreate(
+                threshold_price=700.0,
+                notification_channel="telegram",
+                telegram_chat_id="8010225684"
+            )
+
+            res = create_alert(request=mock_req, product_id=prod.id, alert=payload, current_user=user, db=db)
+
+            # Assert DB record exists and is Active
+            alert_db = db.query(AlertThreshold).filter(AlertThreshold.id == res["id"]).first()
+            assert alert_db is not None
+            assert alert_db.status == "ACTIVE"
+            assert alert_db.telegram_chat_id == "8010225684"
+
+            # Assert confirmation was sent to chat_id
+            mock_get_notifier.assert_called_once_with("telegram")
+            mock_notifier.send_alert.assert_called_once()
+            call_args = mock_notifier.send_alert.call_args
+            assert call_args[0][0] == "8010225684"
+            assert "Test Headphones" in call_args[0][1]
+            assert "700.00" in call_args[0][1]
+            assert res["confirmation_sent"] is True
+        finally:
+            db.close()
+
+    @patch("backend.api_routes.get_notifier")
+    def test_create_alert_delivery_failure_does_not_rollback_db(self, mock_get_notifier):
+        """Telegram confirmation failure leaves alert record active in DB."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, Product, AlertThreshold
+        from backend.api_routes import create_alert, AlertCreate
+        from unittest.mock import MagicMock
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            email = f"confirm_fail_{uuid.uuid4().hex[:6]}@example.com"
+            user = User(name="Test User 2", email=email, password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            prod = Product(user_id=user.id, url=f"https://www.amazon.in/dp/B0{uuid.uuid4().hex[:6]}", title="Fail Product", platform="amazon")
+            db.add(prod)
+            db.commit()
+
+            mock_notifier = MagicMock()
+            mock_notifier.send_alert.return_value = False  # Delivery fails (e.g. unconfigured token)
+            mock_get_notifier.return_value = mock_notifier
+
+            mock_req = Request({"type": "http", "path": "/products/1/alerts", "client": ("127.0.0.1", 12345), "headers": []})
+
+            payload = AlertCreate(
+                threshold_price=500.0,
+                notification_channel="telegram",
+                telegram_chat_id="8010225684"
+            )
+
+            res = create_alert(request=mock_req, product_id=prod.id, alert=payload, current_user=user, db=db)
+
+            # Alert record MUST still exist in database
+            alert_db = db.query(AlertThreshold).filter(AlertThreshold.id == res["id"]).first()
+            assert alert_db is not None
+            assert alert_db.status == "ACTIVE"
+            assert res["confirmation_sent"] is False
+        finally:
+            db.close()
+
