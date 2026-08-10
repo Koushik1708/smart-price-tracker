@@ -1,10 +1,14 @@
 from abc import ABC, abstractmethod
 from twilio.rest import Client
 import os
+import logging
+import requests
+
+logger = logging.getLogger(__name__)
 
 class NotificationProvider(ABC):
     @abstractmethod
-    def send_alert(self, phone_number: str, message: str) -> bool:
+    def send_alert(self, destination: str, message: str) -> bool:
         pass
 
 class TwilioSandboxProvider(NotificationProvider):
@@ -48,3 +52,68 @@ class TwilioSandboxProvider(NotificationProvider):
         except Exception as e:
             print(f"[Twilio Provider] Failed to send Twilio alert: {e}")
             return False
+
+class TelegramProvider(NotificationProvider):
+    """Sends notifications via the Telegram Bot API (HTTPS)."""
+
+    def __init__(self):
+        self.bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        self.default_chat_id = os.environ.get('TELEGRAM_DEFAULT_CHAT_ID')
+        
+        if not self.bot_token:
+            logger.warning("[Telegram Provider] TELEGRAM_BOT_TOKEN is not configured.")
+
+    def send_alert(self, chat_id: str, message: str) -> bool:
+        if not self.bot_token:
+            logger.warning("[Telegram Provider] Cannot send alert: TELEGRAM_BOT_TOKEN not configured.")
+            return False
+        
+        destination = chat_id or self.default_chat_id
+        if not destination:
+            logger.warning("[Telegram Provider] Cannot send alert: No chat_id provided and no default configured.")
+            return False
+        
+        
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": destination,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+            
+            result = resp.json()
+            if result.get("ok"):
+                logger.info(f"[Telegram Provider] Message sent to chat {destination}.")
+                return True
+            else:
+                error_desc = result.get("description", "Unknown Telegram API error")
+                logger.warning(f"[Telegram Provider] Telegram API returned ok=false: {error_desc}")
+                return False
+        except requests.exceptions.Timeout:
+            logger.warning("[Telegram Provider] Request timed out.")
+            return False
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"[Telegram Provider] HTTP error: {e}")
+            return False
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[Telegram Provider] Request failed: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"[Telegram Provider] Unexpected error: {e}")
+            return False
+
+
+SUPPORTED_CHANNELS = {"whatsapp", "telegram"}
+
+def get_notifier(channel: str) -> NotificationProvider:
+    """Factory function returning the appropriate NotificationProvider for the given channel."""
+    if channel == "whatsapp":
+        return TwilioSandboxProvider()
+    elif channel == "telegram":
+        return TelegramProvider()
+    else:
+        raise ValueError(f"Unsupported notification channel: '{channel}'. Supported: {SUPPORTED_CHANNELS}")

@@ -79,6 +79,10 @@ def run_db_migrations():
                 conn.execute(text("ALTER TABLE products ADD COLUMN user_id INTEGER;"))
             if columns_alerts and 'user_id' not in columns_alerts:
                 conn.execute(text("ALTER TABLE alert_thresholds ADD COLUMN user_id INTEGER;"))
+            if columns_alerts and 'notification_channel' not in columns_alerts:
+                conn.execute(text("ALTER TABLE alert_thresholds ADD COLUMN notification_channel VARCHAR DEFAULT 'whatsapp';"))
+            if columns_alerts and 'telegram_chat_id' not in columns_alerts:
+                conn.execute(text("ALTER TABLE alert_thresholds ADD COLUMN telegram_chat_id VARCHAR;"))
     except Exception as e:
         logger.warning(f"Schema migration skipped or failed: {e}")
 
@@ -92,7 +96,7 @@ app = FastAPI(
         {"name": "auth", "description": "Authentication and Identity Management"},
         {"name": "dashboard", "description": "User Dashboard Analytics and Metrics"},
         {"name": "products", "description": "Product Tracking, Snapshots, and CSV Exports"},
-        {"name": "alerts", "description": "WhatsApp Price Drop Alerts"},
+        {"name": "alerts", "description": "Price Drop Alerts (WhatsApp & Telegram)"},
         {"name": "admin", "description": "Enterprise Administration, System Diagnostics, and Audit Logging"},
     ]
 )

@@ -137,7 +137,7 @@ async def _async_scrape_single_product(product_id: int):
                 
                 # Check for active alerts regardless of snapshot insertion
                 from backend.models import AlertThreshold
-                from backend.notifications import TwilioSandboxProvider
+                from backend.notifications import get_notifier
                 
                 active_alerts = db.query(AlertThreshold).filter(
                     AlertThreshold.product_id == product.id,
@@ -145,16 +145,41 @@ async def _async_scrape_single_product(product_id: int):
                 ).all()
                 
                 if active_alerts:
-                    notifier = TwilioSandboxProvider()
                     for alert in active_alerts:
                         if data['current_price'] <= alert.threshold_price:
-                            msg = f"PRICE DROP ALERT!\n\n{product.title}\n\nCurrent Price: ₹{data['current_price']}\nTarget: ₹{alert.threshold_price}\n\nLink: {product.url}"
-                            success = notifier.send_alert(alert.phone_number, msg)
-                            if success:
-                                alert.status = "TRIGGERED"
-                                db.add(alert)
-                            else:
-                                logger.warning(f"Failed to send alert {alert.id} to {alert.phone_number}.", extra={"product_id": product.id})
+                            channel = getattr(alert, 'notification_channel', 'whatsapp') or 'whatsapp'
+                            
+                            # Build notification message
+                            msg_lines = [
+                                "🔔 Price Drop Alert!",
+                                "",
+                                f"Product: {product.title}",
+                                f"Current Price: ₹{data['current_price']:,.2f}",
+                            ]
+                            if data.get('mrp_shown') and data['mrp_shown'] > data['current_price']:
+                                msg_lines.append(f"MRP: ₹{data['mrp_shown']:,.2f}")
+                                drop = data['mrp_shown'] - data['current_price']
+                                msg_lines.append(f"Discount: ₹{drop:,.2f}")
+                            msg_lines.append(f"Your Alert: ₹{alert.threshold_price:,.2f}")
+                            msg_lines.append("")
+                            msg_lines.append(f"{product.url}")
+                            msg = "\n".join(msg_lines)
+                            
+                            try:
+                                notifier = get_notifier(channel)
+                                if channel == "telegram":
+                                    destination = getattr(alert, 'telegram_chat_id', None)
+                                else:
+                                    destination = alert.phone_number
+                                
+                                success = notifier.send_alert(destination, msg)
+                                if success:
+                                    alert.status = "TRIGGERED"
+                                    db.add(alert)
+                                else:
+                                    logger.warning(f"Failed to send {channel} alert {alert.id}.", extra={"product_id": product.id})
+                            except Exception as notify_err:
+                                logger.warning(f"Notification error for alert {alert.id} ({channel}): {notify_err}", extra={"product_id": product.id})
         else:
             reason = "Scraper returned no data."
             logger.error(f"Failed to scrape {product.url}", extra={"product_id": product.id, "url": product.url, "error_reason": reason})

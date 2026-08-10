@@ -74,6 +74,8 @@ class AlertThreshold(Base):
     phone_number = Column(String) # For WhatsApp
     threshold_price = Column(Float)
     status = Column(String, default="ACTIVE", index=True) # ACTIVE, TRIGGERED, FAILED
+    notification_channel = Column(String, default="whatsapp", index=True) # whatsapp, telegram
+    telegram_chat_id = Column(String, nullable=True)
 
     product = relationship("Product", back_populates="alert_thresholds")
     user = relationship("User", back_populates="alert_thresholds")

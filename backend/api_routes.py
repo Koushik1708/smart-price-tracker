@@ -2,12 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from backend.database import get_db
-from backend.notifications import TwilioSandboxProvider
+from backend.notifications import TwilioSandboxProvider, get_notifier, SUPPORTED_CHANNELS
 from backend.auth import get_current_user
 from backend.models import User, Product, PriceSnapshot, AlertThreshold
 from backend.services.task_scheduler import schedule_scrape
 from pydantic import BaseModel, Field, HttpUrl, field_validator
-from typing import List
+from typing import List, Literal
 import os
 from backend.config import settings
 
@@ -275,10 +275,16 @@ def get_health(request: Request, response: Response, db: Session = Depends(get_d
         health_status["queue"] = {"status": "healthy", "depth": 0}
 
     # 8. Check Notifications
-    if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_WHATSAPP_NUMBER:
-        health_status["notifications"] = "healthy"
+    whatsapp_ok = bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_WHATSAPP_NUMBER)
+    telegram_ok = bool(settings.TELEGRAM_BOT_TOKEN)
+    health_status["notifications"] = {
+        "whatsapp": "configured" if whatsapp_ok else "not_configured",
+        "telegram": "configured" if telegram_ok else "not_configured"
+    }
+    if whatsapp_ok or telegram_ok:
+        health_status["notifications"]["status"] = "healthy"
     else:
-        health_status["notifications"] = "not_configured"
+        health_status["notifications"]["status"] = "not_configured"
 
     # Decision Logic & HTTP Status Code Mapping:
     if critical_failures:
@@ -648,14 +654,40 @@ def search_products(
     }
 
 class AlertCreate(BaseModel):
-    phone_number: str = Field(..., min_length=10, max_length=15, pattern=r"^\+?\d+$")
     threshold_price: float = Field(..., gt=0)
+    notification_channel: str = Field(default="whatsapp")
+    phone_number: Optional[str] = Field(default=None, min_length=10, max_length=15, pattern=r"^\+?\d+$")
+    telegram_chat_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator('notification_channel')
+    @classmethod
+    def validate_channel(cls, v):
+        if v not in SUPPORTED_CHANNELS:
+            raise ValueError(f"Unsupported notification channel: '{v}'. Must be one of: {SUPPORTED_CHANNELS}")
+        return v
 
 @router.post("/products/{product_id}/alerts")
 @limiter.limit(settings.ALERT_RATE_LIMIT)
 def create_alert(request: Request, product_id: int, alert: AlertCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from backend.config import settings
     from backend.services.audit_service import log_audit_event
+    from backend.tracing import get_traced_logger
+    logger = get_traced_logger(__name__)
+    
+    channel = alert.notification_channel
+    
+    # Channel-specific destination validation
+    if channel == "whatsapp":
+        if not alert.phone_number:
+            raise HTTPException(status_code=400, detail="phone_number is required for WhatsApp alerts")
+        phone_number = alert.phone_number.strip()
+        if phone_number.startswith("+"):
+            phone_number = f"whatsapp:{phone_number}"
+        if not phone_number.startswith("whatsapp:+") or len(phone_number) < 12:
+            raise HTTPException(status_code=400, detail="Phone number must start with '+' (e.g. +91...) and include country code")
+    elif channel == "telegram":
+        if not alert.telegram_chat_id:
+            raise HTTPException(status_code=400, detail="telegram_chat_id is required for Telegram alerts")
     
     # Enforce operational alert limit per user
     user_alert_count = db.query(AlertThreshold).filter(AlertThreshold.user_id == current_user.id).count()
@@ -664,15 +696,6 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
             status_code=400,
             detail=f"Alert limit reached. Maximum allowed price alerts per user is {settings.MAX_ALERTS_PER_USER}."
         )
-
-    phone_number = alert.phone_number.strip()
-    if phone_number.startswith("+"):
-        phone_number = f"whatsapp:{phone_number}"
-        
-    if not phone_number.startswith("whatsapp:+") or len(phone_number) < 12:
-        raise HTTPException(status_code=400, detail="Phone number must start with '+' (e.g. +91...) and include country code")
-        
-    alert.phone_number = phone_number
         
     product = db.query(Product).filter(Product.id == product_id, Product.user_id == current_user.id).first()
     if not product:
@@ -681,27 +704,18 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
     new_alert = AlertThreshold(
         user_id=current_user.id,
         product_id=product.id,
-        phone_number=alert.phone_number,
         threshold_price=alert.threshold_price,
+        notification_channel=channel,
+        phone_number=phone_number if channel == "whatsapp" else None,
+        telegram_chat_id=alert.telegram_chat_id if channel == "telegram" else None,
         status="ACTIVE"
     )
     
-    notifier = TwilioSandboxProvider()
-    msg = f"✅ Price Alert Activated!\n\nProduct: {product.title}\n\nWe will notify you here when the price drops to ₹{alert.threshold_price} or below."
-    
-    success = notifier.send_alert(alert.phone_number, msg)
-    if not success:
-        from backend.tracing import get_traced_logger
-        logger = get_traced_logger(__name__)
-        logger.warning(f"WhatsApp confirmation message could not be sent to {alert.phone_number}. Alert recorded in database.")
-        
     db.add(new_alert)
     try:
         db.commit()
     except Exception as e:
         db.rollback()
-        from backend.tracing import get_traced_logger
-        logger = get_traced_logger(__name__)
         logger.error(f"Failed to create alert for product {product_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database transaction failed")
         
@@ -711,7 +725,7 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
         action="ALERT_CREATED",
         outcome="SUCCESS",
         user_id=current_user.id,
-        details={"alert_id": new_alert.id, "product_id": product.id, "threshold": alert.threshold_price},
+        details={"alert_id": new_alert.id, "product_id": product.id, "threshold": alert.threshold_price, "channel": channel},
         request=request
     )
     return {
@@ -721,7 +735,9 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
         "phone_number": new_alert.phone_number,
         "threshold_price": new_alert.threshold_price,
         "status": new_alert.status,
-        "is_triggered": new_alert.status == "TRIGGERED"
+        "is_triggered": new_alert.status == "TRIGGERED",
+        "notification_channel": new_alert.notification_channel,
+        "telegram_chat_id": new_alert.telegram_chat_id
     }
 
 @router.get("/products/{product_id}/alerts")
@@ -735,7 +751,9 @@ def get_alerts(product_id: int, current_user: User = Depends(get_current_user), 
             "phone_number": a.phone_number,
             "threshold_price": a.threshold_price,
             "status": a.status,
-            "is_triggered": a.status == "TRIGGERED"
+            "is_triggered": a.status == "TRIGGERED",
+            "notification_channel": getattr(a, 'notification_channel', 'whatsapp') or 'whatsapp',
+            "telegram_chat_id": getattr(a, 'telegram_chat_id', None)
         }
         for a in alerts
     ]

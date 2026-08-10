@@ -44,6 +44,8 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
   const [alerts, setAlerts] = useState([]);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [thresholdPrice, setThresholdPrice] = useState('');
+  const [notificationChannel, setNotificationChannel] = useState('whatsapp');
+  const [telegramChatId, setTelegramChatId] = useState('');
   const [isSettingAlert, setIsSettingAlert] = useState(false);
 
   const abortControllerRef = useRef(null);
@@ -122,16 +124,26 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
   const handleAddAlert = (e) => {
     e.preventDefault();
-    if (!phoneNumber || !thresholdPrice) return;
+    if (!thresholdPrice) return;
+    if (notificationChannel === 'whatsapp' && !phoneNumber) return;
+    if (notificationChannel === 'telegram' && !telegramChatId) return;
+    
+    const payload = {
+      threshold_price: parseFloat(thresholdPrice),
+      notification_channel: notificationChannel
+    };
+    if (notificationChannel === 'whatsapp') {
+      payload.phone_number = phoneNumber;
+    } else if (notificationChannel === 'telegram') {
+      payload.telegram_chat_id = telegramChatId;
+    }
     
     setIsSettingAlert(true);
-    apiClient.post(`/products/${productId}/alerts`, {
-      phone_number: phoneNumber,
-      threshold_price: parseFloat(thresholdPrice)
-    }).then(res => {
+    apiClient.post(`/products/${productId}/alerts`, payload).then(res => {
       setAlerts(prev => [...prev, res.data]);
       setPhoneNumber('');
       setThresholdPrice('');
+      setTelegramChatId('');
       if (showToast) showToast('Price alert set successfully.', 'success');
     }).catch(err => {
       if (showToast) showToast(err.customMessage || 'Failed to set alert', 'error');
@@ -333,27 +345,53 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm space-y-5 transition-colors">
         <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Price Drop Alert Setup</h3>
         
-        <form onSubmit={handleAddAlert} className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <input
-            type="text"
-            placeholder="WhatsApp Phone (+91...)"
-            value={phoneNumber}
-            onChange={(e) => setPhoneNumber(e.target.value)}
-            className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
-            required
-          />
-          <input
-            type="number"
-            placeholder="Target Price Threshold (₹)"
-            value={thresholdPrice}
-            onChange={(e) => setThresholdPrice(e.target.value)}
-            className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
-            required
-          />
+        <form onSubmit={handleAddAlert} className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <select
+              value={notificationChannel}
+              onChange={(e) => setNotificationChannel(e.target.value)}
+              className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 transition-colors"
+            >
+              <option value="whatsapp">📱 WhatsApp</option>
+              <option value="telegram">✈️ Telegram</option>
+            </select>
+            {notificationChannel === 'whatsapp' ? (
+              <input
+                type="text"
+                placeholder="WhatsApp Phone (+91...)"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
+                required
+              />
+            ) : (
+              <input
+                type="text"
+                placeholder="Telegram Chat ID"
+                value={telegramChatId}
+                onChange={(e) => setTelegramChatId(e.target.value)}
+                className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
+                required
+              />
+            )}
+            <input
+              type="number"
+              placeholder="Target Price Threshold (₹)"
+              value={thresholdPrice}
+              onChange={(e) => setThresholdPrice(e.target.value)}
+              className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
+              required
+            />
+          </div>
+          {notificationChannel === 'telegram' && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              To get your Chat ID: message your bot on Telegram, then visit <code className="bg-slate-100 dark:bg-slate-700 px-1 rounded">https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code> to find it.
+            </p>
+          )}
           <button
             type="submit"
             disabled={isSettingAlert}
-            className="bg-indigo-600 dark:bg-indigo-500 hover:bg-indigo-700 dark:hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors disabled:opacity-50 shadow-md shadow-indigo-200 dark:shadow-none flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-slate-900"
+            className="w-full md:w-auto bg-indigo-600 dark:bg-indigo-500 hover:bg-indigo-700 dark:hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors disabled:opacity-50 shadow-md shadow-indigo-200 dark:shadow-none flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-slate-900"
           >
             {isSettingAlert ? (
               <>
@@ -379,11 +417,12 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
               className="py-8"
             />
           ) : (
-            <div className="overflow-x-auto border border-slate-100 dark:border-slate-700/60 rounded-xl">
+             <div className="overflow-x-auto border border-slate-100 dark:border-slate-700/60 rounded-xl">
               <table className="w-full text-left text-sm text-slate-700 dark:text-slate-300">
                 <thead className="bg-slate-50 dark:bg-slate-700/40 text-xs font-bold text-slate-500 dark:text-slate-400 uppercase border-b border-slate-100 dark:border-slate-700/60">
                   <tr>
-                    <th className="p-3">Phone Number</th>
+                    <th className="p-3">Channel</th>
+                    <th className="p-3">Destination</th>
                     <th className="p-3">Target Price</th>
                     <th className="p-3">Status</th>
                     <th className="p-3 text-right">Actions</th>
@@ -392,7 +431,20 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700/40">
                   {alerts.map(alert => (
                     <tr key={alert.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
-                      <td className="p-3 font-semibold text-slate-800 dark:text-slate-100">{alert.phone_number}</td>
+                      <td className="p-3">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                          (alert.notification_channel || 'whatsapp') === 'telegram'
+                            ? 'bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-400 border border-sky-100 dark:border-sky-900/50'
+                            : 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/50'
+                        }`}>
+                          {(alert.notification_channel || 'whatsapp') === 'telegram' ? '✈️ Telegram' : '📱 WhatsApp'}
+                        </span>
+                      </td>
+                      <td className="p-3 font-semibold text-slate-800 dark:text-slate-100">
+                        {(alert.notification_channel || 'whatsapp') === 'telegram'
+                          ? (alert.telegram_chat_id || '—')
+                          : (alert.phone_number || '—')}
+                      </td>
                       <td className="p-3 font-bold text-indigo-600 dark:text-indigo-400">₹{alert.threshold_price?.toLocaleString()}</td>
                       <td className="p-3">
                         <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
