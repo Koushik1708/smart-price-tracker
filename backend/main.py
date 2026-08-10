@@ -97,6 +97,10 @@ def run_db_migrations():
             if not inspector.has_table("telegram_connect_codes"):
                 from backend.models import TelegramConnectCode
                 TelegramConnectCode.__table__.create(bind=conn, checkfirst=True)
+
+            # Ensure primary account has admin privileges for admin endpoints
+            if inspector.has_table("users"):
+                conn.execute(text("UPDATE users SET is_admin = TRUE WHERE email = 'koushiknayak2006@gmail.com';"))
     except Exception as e:
         logger.warning(f"Schema migration skipped or failed: {e}")
 
