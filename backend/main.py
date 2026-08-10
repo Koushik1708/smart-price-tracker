@@ -83,6 +83,10 @@ def run_db_migrations():
                 conn.execute(text("ALTER TABLE alert_thresholds ADD COLUMN notification_channel VARCHAR DEFAULT 'whatsapp';"))
             if columns_alerts and 'telegram_chat_id' not in columns_alerts:
                 conn.execute(text("ALTER TABLE alert_thresholds ADD COLUMN telegram_chat_id VARCHAR;"))
+            
+            if not inspector.has_table("notification_preferences"):
+                from backend.models import NotificationPreference
+                NotificationPreference.__table__.create(bind=conn, checkfirst=True)
     except Exception as e:
         logger.warning(f"Schema migration skipped or failed: {e}")
 

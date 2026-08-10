@@ -158,3 +158,22 @@ def build_alert_confirmation_message(
             "You will receive a WhatsApp notification when the product price reaches or falls below your target price."
         )
 
+def build_direct_test_notification_message(channel: str = "telegram", custom_message: str = None) -> str:
+    """Builds default or custom test notification message."""
+    if custom_message and str(custom_message).strip():
+        return str(custom_message).strip()
+
+    if channel == "telegram":
+        return (
+            "🔔 <b>Smart Price Tracker</b>\n\n"
+            "This is a test notification.\n\n"
+            "Telegram notifications are configured correctly."
+        )
+    else:
+        return (
+            "🔔 *Smart Price Tracker*\n\n"
+            "This is a test notification.\n\n"
+            "WhatsApp notifications are configured correctly."
+        )
+
+

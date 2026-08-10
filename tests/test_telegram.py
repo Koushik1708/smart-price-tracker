@@ -416,3 +416,199 @@ class TestAlertConfirmation:
         finally:
             db.close()
 
+
+# --------------------------------------------------------------------------- #
+# 6. Phase 6.2 Saved Notification Preferences & Direct Trigger Tests
+# --------------------------------------------------------------------------- #
+
+class TestNotificationPreferencesAndDirectTrigger:
+    """Tests for Phase 6.2 notification preferences and direct test triggers."""
+
+    def test_get_and_update_notification_preferences(self):
+        """User can fetch and update saved notification preferences."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference
+        from backend.api_routes import get_notification_preferences, update_notification_preferences, NotificationPreferenceSchema
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            email = f"pref_user_{uuid.uuid4().hex[:6]}@example.com"
+            user = User(name="Pref User", email=email, password_hash="hash")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            # Get default preferences (auto-created)
+            prefs = get_notification_preferences(current_user=user, db=db)
+            assert prefs["default_notification_channel"] == "whatsapp"
+
+            # Update preferences
+            req = Request({"type": "http", "path": "/notifications/preferences", "client": ("127.0.0.1", 12345), "headers": []})
+            update_payload = NotificationPreferenceSchema(
+                whatsapp_phone_number="+919876543210",
+                telegram_chat_id="8010225684",
+                default_notification_channel="telegram"
+            )
+            updated = update_notification_preferences(request=req, preferences=update_payload, current_user=user, db=db)
+            assert updated["telegram_chat_id"] == "8010225684"
+            assert updated["whatsapp_phone_number"] == "whatsapp:+919876543210"
+            assert updated["default_notification_channel"] == "telegram"
+
+            # Verify in DB
+            db_pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == user.id).first()
+            assert db_pref.telegram_chat_id == "8010225684"
+        finally:
+            db.close()
+
+    def test_user_preference_isolation(self):
+        """User A preferences cannot be retrieved or modified by User B."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference
+        from backend.api_routes import get_notification_preferences, update_notification_preferences, NotificationPreferenceSchema
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user_a = User(name="User A", email=f"usera_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            user_b = User(name="User B", email=f"userb_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add_all([user_a, user_b])
+            db.commit()
+
+            req = Request({"type": "http", "path": "/notifications/preferences", "client": ("127.0.0.1", 12345), "headers": []})
+            update_notification_preferences(request=req, preferences=NotificationPreferenceSchema(telegram_chat_id="111111"), current_user=user_a, db=db)
+
+            # User B fetches preferences
+            prefs_b = get_notification_preferences(current_user=user_b, db=db)
+            assert prefs_b["telegram_chat_id"] is None
+        finally:
+            db.close()
+
+    @patch("backend.api_routes.get_notifier")
+    def test_create_alert_uses_saved_destination_fallback(self, mock_get_notifier):
+        """Alert can be created using saved preference destination when not explicitly provided."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, Product, AlertThreshold, NotificationPreference
+        from backend.api_routes import create_alert, AlertCreate
+        from unittest.mock import MagicMock
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            email = f"fallback_{uuid.uuid4().hex[:6]}@example.com"
+            user = User(name="Fallback User", email=email, password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            pref = NotificationPreference(user_id=user.id, telegram_chat_id="8010225684", default_notification_channel="telegram")
+            db.add(pref)
+
+            prod = Product(user_id=user.id, url=f"https://www.amazon.in/dp/B0{uuid.uuid4().hex[:6]}", title="Fallback Product", platform="amazon")
+            db.add(prod)
+            db.commit()
+
+            mock_notifier = MagicMock()
+            mock_notifier.send_alert.return_value = True
+            mock_get_notifier.return_value = mock_notifier
+
+            mock_req = Request({"type": "http", "path": "/products/1/alerts", "client": ("127.0.0.1", 12345), "headers": []})
+            # Payload omits telegram_chat_id explicitly
+            payload = AlertCreate(
+                threshold_price=999.0,
+                notification_channel="telegram"
+            )
+
+            res = create_alert(request=mock_req, product_id=prod.id, alert=payload, current_user=user, db=db)
+            assert res["telegram_chat_id"] == "8010225684"
+            assert res["status"] == "ACTIVE"
+        finally:
+            db.close()
+
+    @patch("backend.api_routes.get_notifier")
+    def test_send_direct_test_notification_telegram(self, mock_get_notifier):
+        """Direct test notification triggers TelegramProvider using saved chat ID."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference, Product, AlertThreshold
+        from backend.api_routes import send_direct_test_notification, DirectNotificationRequest
+        from unittest.mock import MagicMock
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Test Trigger User", email=f"direct_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            pref = NotificationPreference(user_id=user.id, telegram_chat_id="8010225684")
+            db.add(pref)
+            db.commit()
+
+            mock_notifier = MagicMock()
+            mock_notifier.send_alert.return_value = True
+            mock_get_notifier.return_value = mock_notifier
+
+            mock_req = Request({"type": "http", "path": "/notifications/test", "client": ("127.0.0.1", 12345), "headers": []})
+            payload = DirectNotificationRequest(channel="telegram")
+
+            res = send_direct_test_notification(request=mock_req, payload=payload, current_user=user, db=db)
+            assert res["success"] is True
+            assert res["destination"] == "8010225684"
+
+            mock_get_notifier.assert_called_once_with("telegram")
+            mock_notifier.send_alert.assert_called_once()
+            assert mock_notifier.send_alert.call_args[0][0] == "8010225684"
+
+            # Verify direct trigger isolation: NO Products or AlertThresholds created!
+            assert db.query(Product).filter(Product.user_id == user.id).count() == 0
+            assert db.query(AlertThreshold).filter(AlertThreshold.user_id == user.id).count() == 0
+        finally:
+            db.close()
+
+    @patch("backend.api_routes.get_notifier")
+    def test_send_direct_test_notification_provider_failure(self, mock_get_notifier):
+        """Direct test notification handles provider failure without exposing credentials."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference
+        from backend.api_routes import send_direct_test_notification, DirectNotificationRequest
+        from unittest.mock import MagicMock
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Fail User", email=f"fail_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            pref = NotificationPreference(user_id=user.id, telegram_chat_id="8010225684")
+            db.add(pref)
+            db.commit()
+
+            mock_notifier = MagicMock()
+            mock_notifier.send_alert.return_value = False
+            mock_get_notifier.return_value = mock_notifier
+
+            mock_req = Request({"type": "http", "path": "/notifications/test", "client": ("127.0.0.1", 12345), "headers": []})
+            payload = DirectNotificationRequest(channel="telegram")
+
+            res = send_direct_test_notification(request=mock_req, payload=payload, current_user=user, db=db)
+            assert res["success"] is False
+            assert "Failed to deliver" in res["message"]
+        finally:
+            db.close()
+
+

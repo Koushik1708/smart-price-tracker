@@ -18,6 +18,7 @@ class User(Base):
     products = relationship("Product", back_populates="user", cascade="all, delete-orphan")
     alert_thresholds = relationship("AlertThreshold", back_populates="user", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="user", cascade="all, delete-orphan")
+    notification_preference = relationship("NotificationPreference", uselist=False, back_populates="user", cascade="all, delete-orphan")
 
 class Product(Base):
     __tablename__ = "products"
@@ -96,4 +97,18 @@ class AuditLog(Base):
     details = Column(String, nullable=True)
 
     user = relationship("User", back_populates="audit_logs")
+
+class NotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, index=True, nullable=False)
+    whatsapp_phone_number = Column(String, nullable=True)
+    telegram_chat_id = Column(String, nullable=True)
+    default_notification_channel = Column(String, default="whatsapp")
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
+
+    user = relationship("User", back_populates="notification_preference")
+
 

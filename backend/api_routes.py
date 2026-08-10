@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from backend.database import get_db
-from backend.notifications import TwilioSandboxProvider, get_notifier, SUPPORTED_CHANNELS, build_alert_confirmation_message
+from backend.notifications import TwilioSandboxProvider, get_notifier, SUPPORTED_CHANNELS, build_alert_confirmation_message, build_direct_test_notification_message
 from backend.auth import get_current_user
-from backend.models import User, Product, PriceSnapshot, AlertThreshold
+from backend.models import User, Product, PriceSnapshot, AlertThreshold, NotificationPreference
 from backend.services.task_scheduler import schedule_scrape
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 from typing import List, Literal
@@ -675,19 +675,31 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
     logger = get_traced_logger(__name__)
     
     channel = alert.notification_channel
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
     
-    # Channel-specific destination validation
+    phone_number = None
+    telegram_chat_id = None
+    
+    # Channel-specific destination validation & preference fallback
     if channel == "whatsapp":
-        if not alert.phone_number:
+        input_phone = alert.phone_number or (pref.whatsapp_phone_number if pref else None)
+        if not input_phone:
             raise HTTPException(status_code=400, detail="phone_number is required for WhatsApp alerts")
-        phone_number = alert.phone_number.strip()
+        phone_number = input_phone.strip()
         if phone_number.startswith("+"):
             phone_number = f"whatsapp:{phone_number}"
         if not phone_number.startswith("whatsapp:+") or len(phone_number) < 12:
             raise HTTPException(status_code=400, detail="Phone number must start with '+' (e.g. +91...) and include country code")
+        if pref and not pref.whatsapp_phone_number:
+            pref.whatsapp_phone_number = phone_number
+            db.add(pref)
     elif channel == "telegram":
-        if not alert.telegram_chat_id:
+        telegram_chat_id = alert.telegram_chat_id or (pref.telegram_chat_id if pref else None)
+        if not telegram_chat_id:
             raise HTTPException(status_code=400, detail="telegram_chat_id is required for Telegram alerts")
+        if pref and not pref.telegram_chat_id:
+            pref.telegram_chat_id = telegram_chat_id
+            db.add(pref)
     
     # Enforce operational alert limit per user
     user_alert_count = db.query(AlertThreshold).filter(AlertThreshold.user_id == current_user.id).count()
@@ -707,7 +719,7 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
         threshold_price=alert.threshold_price,
         notification_channel=channel,
         phone_number=phone_number if channel == "whatsapp" else None,
-        telegram_chat_id=alert.telegram_chat_id if channel == "telegram" else None,
+        telegram_chat_id=telegram_chat_id if channel == "telegram" else None,
         status="ACTIVE"
     )
     
@@ -814,5 +826,142 @@ def delete_alert(alert_id: int, current_user: User = Depends(get_current_user), 
     db.delete(alert)
     db.commit()
     return {"message": "Alert deleted successfully"}
+
+
+# --------------------------------------------------------------------------- #
+# Notification Preferences & Direct Test Trigger Endpoints
+# --------------------------------------------------------------------------- #
+
+class NotificationPreferenceSchema(BaseModel):
+    whatsapp_phone_number: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    default_notification_channel: Optional[str] = "whatsapp"
+
+    @field_validator('default_notification_channel')
+    @classmethod
+    def validate_channel(cls, v):
+        if v and v not in SUPPORTED_CHANNELS:
+            raise ValueError(f"Unsupported channel: '{v}'. Must be one of: {SUPPORTED_CHANNELS}")
+        return v
+
+class DirectNotificationRequest(BaseModel):
+    channel: str = Field(default="telegram")
+    message: Optional[str] = None
+    destination: Optional[str] = None
+
+    @field_validator('channel')
+    @classmethod
+    def validate_channel(cls, v):
+        if v not in SUPPORTED_CHANNELS:
+            raise ValueError(f"Unsupported channel: '{v}'. Must be one of: {SUPPORTED_CHANNELS}")
+        return v
+
+@router.get("/notifications/preferences", response_model=NotificationPreferenceSchema)
+def get_notification_preferences(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
+    if not pref:
+        pref = NotificationPreference(user_id=current_user.id, default_notification_channel="whatsapp")
+        db.add(pref)
+        db.commit()
+        db.refresh(pref)
+    return {
+        "whatsapp_phone_number": pref.whatsapp_phone_number,
+        "telegram_chat_id": pref.telegram_chat_id,
+        "default_notification_channel": pref.default_notification_channel or "whatsapp"
+    }
+
+@router.put("/notifications/preferences", response_model=NotificationPreferenceSchema)
+@router.patch("/notifications/preferences", response_model=NotificationPreferenceSchema)
+def update_notification_preferences(
+    request: Request,
+    preferences: NotificationPreferenceSchema,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    from backend.services.audit_service import log_audit_event
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
+    if not pref:
+        pref = NotificationPreference(user_id=current_user.id)
+        db.add(pref)
+    
+    if preferences.whatsapp_phone_number is not None:
+        val = preferences.whatsapp_phone_number.strip() if preferences.whatsapp_phone_number else None
+        if val and val.startswith("+"):
+            val = f"whatsapp:{val}"
+        pref.whatsapp_phone_number = val
+
+    if preferences.telegram_chat_id is not None:
+        pref.telegram_chat_id = preferences.telegram_chat_id.strip() if preferences.telegram_chat_id else None
+
+    if preferences.default_notification_channel:
+        pref.default_notification_channel = preferences.default_notification_channel
+
+    db.commit()
+    db.refresh(pref)
+
+    log_audit_event(db, action="NOTIFICATION_PREFERENCES_UPDATED", outcome="SUCCESS", user_id=current_user.id, request=request)
+    return {
+        "whatsapp_phone_number": pref.whatsapp_phone_number,
+        "telegram_chat_id": pref.telegram_chat_id,
+        "default_notification_channel": pref.default_notification_channel or "whatsapp"
+    }
+
+@router.post("/notifications/test")
+@limiter.limit("5/minute")
+def send_direct_test_notification(
+    request: Request,
+    payload: DirectNotificationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    from backend.tracing import get_traced_logger
+    logger = get_traced_logger(__name__)
+
+    channel = payload.channel
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
+
+    # Determine destination
+    destination = payload.destination
+    if not destination:
+        if channel == "telegram" and pref and pref.telegram_chat_id:
+            destination = pref.telegram_chat_id
+        elif channel == "whatsapp" and pref and pref.whatsapp_phone_number:
+            destination = pref.whatsapp_phone_number
+
+    if not destination:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No {channel} destination configured for your account. Please enter or save a destination first."
+        )
+
+    # Format destination for WhatsApp if needed
+    if channel == "whatsapp" and destination.startswith("+"):
+        destination = f"whatsapp:{destination}"
+
+    # Build test message
+    test_msg = build_direct_test_notification_message(channel, payload.message)
+
+    success = False
+    try:
+        notifier = get_notifier(channel)
+        success = notifier.send_alert(destination, test_msg)
+    except Exception as e:
+        logger.warning(f"Direct test notification error ({channel}): {e}")
+
+    if not success:
+        return {
+            "success": False,
+            "channel": channel,
+            "destination": destination,
+            "message": f"Failed to deliver test notification via {channel}. Please check provider configuration and credentials."
+        }
+
+    return {
+        "success": True,
+        "channel": channel,
+        "destination": destination,
+        "message": f"Test notification sent successfully to {channel}!"
+    }
+
 
 

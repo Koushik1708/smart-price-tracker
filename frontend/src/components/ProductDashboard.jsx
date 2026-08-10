@@ -48,9 +48,90 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
   const [telegramChatId, setTelegramChatId] = useState('');
   const [isSettingAlert, setIsSettingAlert] = useState(false);
 
+  const [preferences, setPreferences] = useState(null);
+  const [testChannel, setTestChannel] = useState('telegram');
+  const [testDestination, setTestDestination] = useState('');
+  const [testMessage, setTestMessage] = useState('');
+  const [isSendingTest, setIsSendingTest] = useState(false);
+  const [isSavingPrefs, setIsSavingPrefs] = useState(false);
+
   const abortControllerRef = useRef(null);
   const pollingTimerRef = useRef(null);
   const isComponentMounted = useRef(true);
+
+  const fetchPreferences = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/notifications/preferences');
+      if (res.data && isComponentMounted.current) {
+        setPreferences(res.data);
+        const defaultCh = res.data.default_notification_channel || 'whatsapp';
+        setNotificationChannel(defaultCh);
+        setTestChannel(defaultCh);
+        if (res.data.whatsapp_phone_number) {
+          setPhoneNumber(res.data.whatsapp_phone_number);
+        }
+        if (res.data.telegram_chat_id) {
+          setTelegramChatId(res.data.telegram_chat_id);
+        }
+        setTestDestination(defaultCh === 'telegram' ? (res.data.telegram_chat_id || '') : (res.data.whatsapp_phone_number || ''));
+      }
+    } catch (err) {
+      console.warn("Failed to load notification preferences", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPreferences();
+  }, [fetchPreferences]);
+
+  const handleChannelChange = (ch) => {
+    setNotificationChannel(ch);
+    if (ch === 'telegram' && preferences?.telegram_chat_id) {
+      setTelegramChatId(preferences.telegram_chat_id);
+    } else if (ch === 'whatsapp' && preferences?.whatsapp_phone_number) {
+      setPhoneNumber(preferences.whatsapp_phone_number);
+    }
+  };
+
+  const handleSavePreferences = async (e) => {
+    e.preventDefault();
+    setIsSavingPrefs(true);
+    try {
+      const res = await apiClient.put('/notifications/preferences', {
+        whatsapp_phone_number: phoneNumber,
+        telegram_chat_id: telegramChatId,
+        default_notification_channel: notificationChannel
+      });
+      setPreferences(res.data);
+      if (showToast) showToast('Notification preferences saved successfully!', 'success');
+    } catch (err) {
+      if (showToast) showToast(err.customMessage || 'Failed to save preferences', 'error');
+    } finally {
+      if (isComponentMounted.current) setIsSavingPrefs(false);
+    }
+  };
+
+  const handleSendTestNotification = async (e) => {
+    e.preventDefault();
+    setIsSendingTest(true);
+    try {
+      const payload = {
+        channel: testChannel,
+        destination: testDestination || undefined,
+        message: testMessage || undefined
+      };
+      const res = await apiClient.post('/notifications/test', payload);
+      if (res.data.success) {
+        if (showToast) showToast(`✓ ${res.data.message}`, 'success');
+      } else {
+        if (showToast) showToast(`✗ ${res.data.message}`, 'error');
+      }
+    } catch (err) {
+      if (showToast) showToast(err.response?.data?.detail || err.customMessage || 'Test notification failed', 'error');
+    } finally {
+      if (isComponentMounted.current) setIsSendingTest(false);
+    }
+  };
 
   const fetchProductData = useCallback(async (isSilentRefresh = false) => {
     if (!productId || !isComponentMounted.current) return;
@@ -349,13 +430,20 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
       {/* Alert Configuration & Active Thresholds */}
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm space-y-5 transition-colors">
-        <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Price Drop Alert Setup</h3>
+        <div className="flex justify-between items-center">
+          <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Price Drop Alert Setup</h3>
+          {((notificationChannel === 'telegram' && preferences?.telegram_chat_id) || (notificationChannel === 'whatsapp' && preferences?.whatsapp_phone_number)) && (
+            <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-900/50">
+              ✓ Saved Destination Auto-filled
+            </span>
+          )}
+        </div>
         
         <form onSubmit={handleAddAlert} className="space-y-3">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <select
               value={notificationChannel}
-              onChange={(e) => setNotificationChannel(e.target.value)}
+              onChange={(e) => handleChannelChange(e.target.value)}
               className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 transition-colors"
             >
               <option value="whatsapp">📱 WhatsApp</option>
@@ -394,23 +482,33 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
               To get your Chat ID: message your bot on Telegram, then visit <code className="bg-slate-100 dark:bg-slate-700 px-1 rounded">https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code> to find it.
             </p>
           )}
-          <button
-            type="submit"
-            disabled={isSettingAlert}
-            className="w-full md:w-auto bg-indigo-600 dark:bg-indigo-500 hover:bg-indigo-700 dark:hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors disabled:opacity-50 shadow-md shadow-indigo-200 dark:shadow-none flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-slate-900"
-          >
-            {isSettingAlert ? (
-              <>
-                <svg className="w-4 h-4 animate-spin text-white" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                <span>Setting Alert...</span>
-              </>
-            ) : (
-              <span>🔔 Create Alert</span>
-            )}
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="submit"
+              disabled={isSettingAlert}
+              className="bg-indigo-600 dark:bg-indigo-500 hover:bg-indigo-700 dark:hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors disabled:opacity-50 shadow-md shadow-indigo-200 dark:shadow-none flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {isSettingAlert ? (
+                <>
+                  <svg className="w-4 h-4 animate-spin text-white" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  <span>Setting Alert...</span>
+                </>
+              ) : (
+                <span>🔔 Create Alert</span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleSavePreferences}
+              disabled={isSavingPrefs}
+              className="bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-bold py-3 px-4 rounded-xl text-sm transition-colors disabled:opacity-50"
+            >
+              {isSavingPrefs ? 'Saving...' : '💾 Save as Default Preference'}
+            </button>
+          </div>
         </form>
 
         {/* Existing Alerts Table */}
@@ -475,6 +573,73 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
           )}
         </div>
       </div>
+
+      {/* Direct Test Notification */}
+      <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm space-y-4 transition-colors">
+        <div>
+          <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+            <span>⚡ Direct Notification</span>
+          </h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+            Send an immediate test notification. This does not depend on a product price drop.
+          </p>
+        </div>
+
+        <form onSubmit={handleSendTestNotification} className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Channel</label>
+              <select
+                value={testChannel}
+                onChange={(e) => {
+                  const ch = e.target.value;
+                  setTestChannel(ch);
+                  if (ch === 'telegram') {
+                    setTestDestination(preferences?.telegram_chat_id || '');
+                  } else {
+                    setTestDestination(preferences?.whatsapp_phone_number || '');
+                  }
+                }}
+                className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 transition-colors"
+              >
+                <option value="telegram">✈️ Telegram</option>
+                <option value="whatsapp">📱 WhatsApp</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Destination</label>
+              <input
+                type="text"
+                placeholder={testChannel === 'telegram' ? "Telegram Chat ID" : "WhatsApp (+91...)"}
+                value={testDestination}
+                onChange={(e) => setTestDestination(e.target.value)}
+                className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 transition-colors"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Custom Message (Optional)</label>
+              <input
+                type="text"
+                placeholder="Test message text..."
+                value={testMessage}
+                onChange={(e) => setTestMessage(e.target.value)}
+                className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 transition-colors"
+              />
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={isSendingTest}
+            className="bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors shadow-md disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {isSendingTest ? 'Sending Test...' : '🔔 Send Test Notification'}
+          </button>
+        </form>
+      </div>
+
     </div>
   );
 }
