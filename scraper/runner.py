@@ -166,11 +166,13 @@ async def _async_scrape_single_product(product_id: int):
                             msg = "\n".join(msg_lines)
                             
                             try:
+                                from backend.notifications import get_notifier, resolve_alert_destination
                                 notifier = get_notifier(channel)
-                                if channel == "telegram":
-                                    destination = getattr(alert, 'telegram_chat_id', None)
-                                else:
-                                    destination = alert.phone_number
+                                destination = resolve_alert_destination(db, alert)
+
+                                if not destination:
+                                    logger.warning(f"Skipping {channel} alert {alert.id}: No valid destination connected.", extra={"product_id": product.id})
+                                    continue
                                 
                                 success = notifier.send_alert(destination, msg)
                                 if success:
@@ -178,8 +180,10 @@ async def _async_scrape_single_product(product_id: int):
                                     db.add(alert)
                                 else:
                                     logger.warning(f"Failed to send {channel} alert {alert.id}.", extra={"product_id": product.id})
+
                             except Exception as notify_err:
                                 logger.warning(f"Notification error for alert {alert.id} ({channel}): {notify_err}", extra={"product_id": product.id})
+
         else:
             reason = "Scraper returned no data."
             logger.error(f"Failed to scrape {product.url}", extra={"product_id": product.id, "url": product.url, "error_reason": reason})

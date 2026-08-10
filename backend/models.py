@@ -105,10 +105,25 @@ class NotificationPreference(Base):
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, index=True, nullable=False)
     whatsapp_phone_number = Column(String, nullable=True)
     telegram_chat_id = Column(String, nullable=True)
+    telegram_username = Column(String, nullable=True)
+    telegram_connected_at = Column(DateTime, nullable=True)
     default_notification_channel = Column(String, default="whatsapp")
     created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
 
     user = relationship("User", back_populates="notification_preference")
+
+class TelegramConnectCode(Base):
+    __tablename__ = "telegram_connect_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    code = Column(String, unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
+    expires_at = Column(DateTime, index=True, nullable=False)
+    is_used = Column(Boolean, default=False, index=True)
+
+    user = relationship("User")
+
 
 

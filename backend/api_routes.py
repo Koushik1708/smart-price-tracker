@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from backend.database import get_db
 from backend.notifications import TwilioSandboxProvider, get_notifier, SUPPORTED_CHANNELS, build_alert_confirmation_message, build_direct_test_notification_message
-from backend.auth import get_current_user
+from backend.auth import get_current_user, get_current_admin_user
 from backend.models import User, Product, PriceSnapshot, AlertThreshold, NotificationPreference
 from backend.services.task_scheduler import schedule_scrape
 from pydantic import BaseModel, Field, HttpUrl, field_validator
@@ -694,12 +694,10 @@ def create_alert(request: Request, product_id: int, alert: AlertCreate, current_
             pref.whatsapp_phone_number = phone_number
             db.add(pref)
     elif channel == "telegram":
-        telegram_chat_id = alert.telegram_chat_id or (pref.telegram_chat_id if pref else None)
+        telegram_chat_id = (pref.telegram_chat_id if pref and pref.telegram_chat_id else None) or alert.telegram_chat_id
         if not telegram_chat_id:
-            raise HTTPException(status_code=400, detail="telegram_chat_id is required for Telegram alerts")
-        if pref and not pref.telegram_chat_id:
-            pref.telegram_chat_id = telegram_chat_id
-            db.add(pref)
+            raise HTTPException(status_code=400, detail="Telegram account is not connected. Please connect Telegram in your notification preferences first.")
+
     
     # Enforce operational alert limit per user
     user_alert_count = db.query(AlertThreshold).filter(AlertThreshold.user_id == current_user.id).count()
@@ -838,6 +836,8 @@ class NotificationPreferenceSchema(BaseModel):
     whatsapp_phone_number: Optional[str] = None
     default_telegram_chat_id: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    telegram_username: Optional[str] = None
+    telegram_connected_at: Optional[str] = None
 
     @field_validator('default_notification_channel')
     @classmethod
@@ -869,13 +869,17 @@ def get_notification_preferences(current_user: User = Depends(get_current_user),
         db.refresh(pref)
     phone = pref.whatsapp_phone_number
     tg_id = pref.telegram_chat_id
+    tg_user = pref.telegram_username
+    tg_conn = pref.telegram_connected_at.isoformat() if pref.telegram_connected_at else None
     ch = pref.default_notification_channel or "whatsapp"
     return {
         "default_notification_channel": ch,
         "default_phone_number": phone,
         "whatsapp_phone_number": phone,
         "default_telegram_chat_id": tg_id,
-        "telegram_chat_id": tg_id
+        "telegram_chat_id": tg_id,
+        "telegram_username": tg_user,
+        "telegram_connected_at": tg_conn
     }
 
 @router.put("/notification-preferences", response_model=NotificationPreferenceSchema)
@@ -905,6 +909,9 @@ def update_notification_preferences(
     if input_tg is not None:
         pref.telegram_chat_id = input_tg.strip() if input_tg else None
 
+    if preferences.telegram_username is not None:
+        pref.telegram_username = preferences.telegram_username.strip() if preferences.telegram_username else None
+
     if preferences.default_notification_channel:
         pref.default_notification_channel = preferences.default_notification_channel
 
@@ -914,14 +921,19 @@ def update_notification_preferences(
     log_audit_event(db, action="NOTIFICATION_PREFERENCES_UPDATED", outcome="SUCCESS", user_id=current_user.id, request=request)
     phone = pref.whatsapp_phone_number
     tg_id = pref.telegram_chat_id
+    tg_user = pref.telegram_username
+    tg_conn = pref.telegram_connected_at.isoformat() if pref.telegram_connected_at else None
     ch = pref.default_notification_channel or "whatsapp"
     return {
         "default_notification_channel": ch,
         "default_phone_number": phone,
         "whatsapp_phone_number": phone,
         "default_telegram_chat_id": tg_id,
-        "telegram_chat_id": tg_id
+        "telegram_chat_id": tg_id,
+        "telegram_username": tg_user,
+        "telegram_connected_at": tg_conn
     }
+
 
 @router.post("/notifications/test")
 @limiter.limit("5/minute")
@@ -979,6 +991,259 @@ def send_direct_test_notification(
         "destination": destination,
         "message": f"Test notification sent successfully to {channel}!"
     }
+
+
+# --------------------------------------------------------------------------- #
+# Telegram Account Linking & Webhook Endpoints
+# --------------------------------------------------------------------------- #
+
+class TelegramConnectCodeResponse(BaseModel):
+    code: str
+    expires_at: str
+    bot_username: str
+
+class TelegramStatusResponse(BaseModel):
+    is_connected: bool
+    telegram_username: Optional[str] = None
+    connected_at: Optional[str] = None
+    bot_username: str
+
+@router.post("/telegram/connect-code", response_model=TelegramConnectCodeResponse)
+@limiter.limit("10/minute")
+def generate_telegram_connect_code(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    import secrets
+    import datetime
+    from backend.models import TelegramConnectCode
+    from backend.config import settings
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    # Invalidate previous unused codes for this user so only ONE active unused code exists
+    db.query(TelegramConnectCode).filter(
+        TelegramConnectCode.user_id == current_user.id,
+        TelegramConnectCode.is_used == False
+    ).update({"is_used": True}, synchronize_session=False)
+
+    # Generate secure 6-character code
+    raw_code = secrets.token_hex(3).upper()
+    expires_at = now + datetime.timedelta(minutes=15)
+
+    connect_code = TelegramConnectCode(
+        user_id=current_user.id,
+        code=raw_code,
+        created_at=now,
+        expires_at=expires_at,
+        is_used=False
+    )
+    db.add(connect_code)
+    db.commit()
+    db.refresh(connect_code)
+
+    return {
+        "code": raw_code,
+        "expires_at": expires_at.isoformat(),
+        "bot_username": settings.TELEGRAM_BOT_USERNAME
+    }
+
+@router.get("/telegram/status", response_model=TelegramStatusResponse)
+def get_telegram_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    from backend.config import settings
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
+    
+    is_connected = bool(pref and pref.telegram_chat_id)
+    username = pref.telegram_username if (pref and is_connected) else None
+    connected_at = pref.telegram_connected_at.isoformat() if (pref and is_connected and pref.telegram_connected_at) else None
+
+    return {
+        "is_connected": is_connected,
+        "telegram_username": username,
+        "connected_at": connected_at,
+        "bot_username": settings.TELEGRAM_BOT_USERNAME
+    }
+
+@router.post("/telegram/disconnect")
+def disconnect_telegram(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    from backend.services.audit_service import log_audit_event
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
+    if pref:
+        pref.telegram_chat_id = None
+        pref.telegram_username = None
+        pref.telegram_connected_at = None
+        db.commit()
+
+    log_audit_event(db, action="TELEGRAM_DISCONNECTED", outcome="SUCCESS", user_id=current_user.id, request=request)
+    return {"message": "Telegram account disconnected successfully."}
+
+def process_telegram_update(db: Session, update_data: dict) -> dict:
+    """Helper to process a Telegram update dictionary cleanly from Webhooks or tests."""
+    from backend.models import TelegramConnectCode, NotificationPreference
+    from backend.notifications import get_notifier
+    import datetime
+
+    msg = update_data.get("message", {})
+    if not msg:
+        return {"status": "ignored", "reason": "No message in update"}
+
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id")
+    if not chat_id:
+        return {"status": "ignored", "reason": "No chat_id in message"}
+
+    from_user = msg.get("from", {})
+    username = from_user.get("username")
+    text = (msg.get("text") or "").strip()
+
+    notifier = get_notifier("telegram")
+
+    if text.startswith("/start"):
+        welcome_msg = (
+            "🔔 <b>Smart Price Tracker Bot</b>\n\n"
+            "Welcome! Send <code>/connect &lt;CODE&gt;</code> to link your Telegram account and receive price-drop alerts.\n\n"
+            "Generate a code from your Smart Price Tracker dashboard."
+        )
+        notifier.send_alert(str(chat_id), welcome_msg)
+        return {"status": "processed", "command": "start"}
+
+    elif text.startswith("/connect"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            notifier.send_alert(str(chat_id), "Please provide a connection code.\nExample: <code>/connect ABC123</code>")
+            return {"status": "ignored", "reason": "Missing connection code"}
+
+        raw_code = parts[1].strip().upper()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        now_naive = now.replace(tzinfo=None)
+
+        try:
+            with db.begin_nested():
+                query = db.query(TelegramConnectCode).filter(
+                    TelegramConnectCode.code == raw_code,
+                    TelegramConnectCode.is_used == False,
+                    TelegramConnectCode.expires_at > now_naive
+                )
+
+                if "postgresql" in str(db.bind.dialect.name).lower():
+                    query = query.with_for_update()
+
+                code_rec = query.first()
+                if not code_rec:
+                    notifier.send_alert(str(chat_id), "That connection code is invalid or expired.")
+                    return {"status": "error", "reason": "Invalid or expired code"}
+
+                code_rec.is_used = True
+
+                pref = db.query(NotificationPreference).filter(
+                    NotificationPreference.user_id == code_rec.user_id
+                ).first()
+                if not pref:
+                    pref = NotificationPreference(user_id=code_rec.user_id)
+                    db.add(pref)
+
+                pref.telegram_chat_id = str(chat_id)
+                pref.telegram_username = f"@{username.lstrip('@')}" if username else None
+                pref.telegram_connected_at = now
+                db.commit()
+
+            notifier.send_alert(
+                str(chat_id),
+                "✓ <b>Telegram Connected Successfully</b>\n\nYou can now receive price-drop alerts from Smart Price Tracker."
+            )
+            return {"status": "success", "user_id": code_rec.user_id}
+        except Exception as e:
+            db.rollback()
+            return {"status": "error", "reason": str(e)}
+
+    elif text.startswith("/disconnect"):
+        pref = db.query(NotificationPreference).filter(NotificationPreference.telegram_chat_id == str(chat_id)).first()
+        if pref:
+            pref.telegram_chat_id = None
+            pref.telegram_username = None
+            pref.telegram_connected_at = None
+            db.commit()
+            notifier.send_alert(str(chat_id), "Your Telegram account has been disconnected from Smart Price Tracker.")
+            return {"status": "disconnected"}
+        else:
+            notifier.send_alert(str(chat_id), "This Telegram account is not currently connected to Smart Price Tracker.")
+            return {"status": "not_connected"}
+
+    elif text.startswith("/help"):
+        help_msg = (
+            "<b>Smart Price Tracker Bot Commands:</b>\n\n"
+            "<code>/connect &lt;CODE&gt;</code> - Link your Telegram account\n"
+            "<code>/disconnect</code> - Unlink your account\n"
+            "<code>/help</code> - Show available commands"
+        )
+        notifier.send_alert(str(chat_id), help_msg)
+        return {"status": "processed", "command": "help"}
+
+    else:
+        notifier.send_alert(str(chat_id), "Unknown command. Send <code>/help</code> for available options.")
+        return {"status": "ignored", "reason": "Unknown command"}
+
+@router.post("/telegram/webhook")
+def telegram_webhook(
+    request: Request,
+    payload: dict,
+    db: Session = Depends(get_db)
+):
+    from backend.config import settings
+    # Validate secret token if configured in production
+    if settings.TELEGRAM_WEBHOOK_SECRET:
+        incoming_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if incoming_secret != settings.TELEGRAM_WEBHOOK_SECRET:
+            raise HTTPException(status_code=403, detail="Invalid webhook secret token")
+
+    res = process_telegram_update(db, payload)
+    return {"ok": True, "result": res}
+
+@router.post("/admin/telegram/register-webhook")
+def register_telegram_webhook(
+    current_user: User = Depends(get_current_admin_user)
+):
+    from backend.config import settings
+    if not settings.TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=400, detail="TELEGRAM_BOT_TOKEN is not configured")
+
+    webhook_url = f"{settings.PUBLIC_BACKEND_URL}/telegram/webhook"
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/setWebhook"
+    payload = {"url": webhook_url}
+    if settings.TELEGRAM_WEBHOOK_SECRET:
+        payload["secret_token"] = settings.TELEGRAM_WEBHOOK_SECRET
+
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        return {"success": True, "webhook_url": webhook_url, "telegram_response": resp.json()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to register webhook: {str(e)}")
+
+@router.get("/admin/telegram/webhook-status")
+def get_telegram_webhook_status(
+    current_user: User = Depends(get_current_admin_user)
+):
+    from backend.config import settings
+    if not settings.TELEGRAM_BOT_TOKEN:
+        return {"configured": False, "reason": "TELEGRAM_BOT_TOKEN missing"}
+
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        return {"configured": True, "info": resp.json().get("result", {})}
+    except Exception as e:
+        return {"configured": False, "error": str(e)}
+
 
 
 

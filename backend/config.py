@@ -33,6 +33,10 @@ class Settings:
     # Telegram (Optional)
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_DEFAULT_CHAT_ID = os.getenv("TELEGRAM_DEFAULT_CHAT_ID")
+    TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "Trakermolt_bot")
+    TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+    PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "https://smart-price-tracker-xdgm.onrender.com").rstrip("/")
+
     
     # Celery & Queue
     CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL") or "redis://localhost:6379/0"

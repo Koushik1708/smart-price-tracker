@@ -87,8 +87,19 @@ def run_db_migrations():
             if not inspector.has_table("notification_preferences"):
                 from backend.models import NotificationPreference
                 NotificationPreference.__table__.create(bind=conn, checkfirst=True)
+            else:
+                cols_pref = [col['name'] for col in inspector.get_columns("notification_preferences")]
+                if 'telegram_username' not in cols_pref:
+                    conn.execute(text("ALTER TABLE notification_preferences ADD COLUMN telegram_username VARCHAR;"))
+                if 'telegram_connected_at' not in cols_pref:
+                    conn.execute(text(f"ALTER TABLE notification_preferences ADD COLUMN telegram_connected_at {dt_type};"))
+
+            if not inspector.has_table("telegram_connect_codes"):
+                from backend.models import TelegramConnectCode
+                TelegramConnectCode.__table__.create(bind=conn, checkfirst=True)
     except Exception as e:
         logger.warning(f"Schema migration skipped or failed: {e}")
+
 
 run_db_migrations()
 

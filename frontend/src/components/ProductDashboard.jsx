@@ -55,9 +55,37 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [isSavingPrefs, setIsSavingPrefs] = useState(false);
 
+  // Telegram Account Linking States
+  const [telegramStatus, setTelegramStatus] = useState({ is_connected: false, telegram_username: null, connected_at: null, bot_username: 'Trakermolt_bot' });
+  const [connectModalOpen, setConnectModalOpen] = useState(false);
+  const [connectCodeData, setConnectCodeData] = useState(null);
+  const [isGeneratingCode, setIsGeneratingCode] = useState(false);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
+
   const abortControllerRef = useRef(null);
   const pollingTimerRef = useRef(null);
+  const connectPollTimerRef = useRef(null);
   const isComponentMounted = useRef(true);
+
+  const fetchTelegramStatus = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/telegram/status');
+      if (res.data && isComponentMounted.current) {
+        setTelegramStatus(res.data);
+        if (res.data.is_connected) {
+          if (connectPollTimerRef.current) {
+            clearInterval(connectPollTimerRef.current);
+            connectPollTimerRef.current = null;
+          }
+          setConnectModalOpen(false);
+        }
+        return res.data;
+      }
+    } catch (err) {
+      console.warn("Failed to load Telegram status", err);
+    }
+    return null;
+  }, []);
 
   const fetchPreferences = useCallback(async () => {
     try {
@@ -80,7 +108,49 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
   useEffect(() => {
     fetchPreferences();
-  }, [productId, fetchPreferences]);
+    fetchTelegramStatus();
+  }, [productId, fetchPreferences, fetchTelegramStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (connectPollTimerRef.current) {
+        clearInterval(connectPollTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleGenerateConnectCode = async () => {
+    setIsGeneratingCode(true);
+    try {
+      const res = await apiClient.post('/telegram/connect-code');
+      if (res.data && isComponentMounted.current) {
+        setConnectCodeData(res.data);
+        setConnectModalOpen(true);
+        if (connectPollTimerRef.current) clearInterval(connectPollTimerRef.current);
+        connectPollTimerRef.current = setInterval(() => {
+          fetchTelegramStatus();
+        }, 3000);
+      }
+    } catch (err) {
+      if (showToast) showToast(err.customMessage || 'Failed to generate Telegram connection code', 'error');
+    } finally {
+      if (isComponentMounted.current) setIsGeneratingCode(false);
+    }
+  };
+
+  const handleDisconnectTelegram = async () => {
+    setIsDisconnecting(true);
+    try {
+      await apiClient.post('/telegram/disconnect');
+      await fetchTelegramStatus();
+      await fetchPreferences();
+      if (showToast) showToast('Telegram account disconnected successfully.', 'info');
+    } catch (err) {
+      if (showToast) showToast(err.customMessage || 'Failed to disconnect Telegram', 'error');
+    } finally {
+      if (isComponentMounted.current) setIsDisconnecting(false);
+    }
+  };
 
   const handleChannelChange = (ch) => {
     setNotificationChannel(ch);
@@ -112,6 +182,7 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
       if (isComponentMounted.current) setIsSavingPrefs(false);
     }
   };
+
 
   const handleSendTestNotification = async (e) => {
     e.preventDefault();
@@ -430,11 +501,54 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
       {/* Alert Configuration & Active Thresholds */}
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm space-y-5 transition-colors">
+        {/* Telegram Account Connection Status Header / Banner */}
+        <div className="bg-slate-50 dark:bg-slate-900/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 flex items-center justify-center text-lg font-bold">
+              ✈️
+            </div>
+            <div>
+              <h4 className="text-sm font-bold text-slate-800 dark:text-slate-100">Telegram Notifications</h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {telegramStatus?.is_connected ? (
+                  <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                    ✓ Connected as {telegramStatus.telegram_username || 'Telegram Account'}
+                  </span>
+                ) : (
+                  'Connect Telegram to receive instant price-drop alerts'
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div>
+            {telegramStatus?.is_connected ? (
+              <button
+                type="button"
+                onClick={handleDisconnectTelegram}
+                disabled={isDisconnecting}
+                className="bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 font-bold px-3 py-1.5 rounded-lg text-xs border border-rose-200 dark:border-rose-900/50 transition-colors"
+              >
+                {isDisconnecting ? 'Disconnecting...' : 'Disconnect'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGenerateConnectCode}
+                disabled={isGeneratingCode}
+                className="bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-xs transition-colors shadow-sm"
+              >
+                {isGeneratingCode ? 'Generating...' : '⚡ Connect Telegram'}
+              </button>
+            )}
+          </div>
+        </div>
+
         <div className="flex justify-between items-center">
           <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Price Drop Alert Setup</h3>
-          {((notificationChannel === 'telegram' && preferences?.telegram_chat_id) || (notificationChannel === 'whatsapp' && preferences?.whatsapp_phone_number)) && (
+          {((notificationChannel === 'telegram' && telegramStatus?.is_connected) || (notificationChannel === 'whatsapp' && preferences?.whatsapp_phone_number)) && (
             <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-900/50">
-              ✓ Saved Destination Auto-filled
+              ✓ Destination Ready
             </span>
           )}
         </div>
@@ -458,15 +572,22 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
                 className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
                 required
               />
+            ) : telegramStatus?.is_connected ? (
+              <div className="p-3 border border-emerald-200 dark:border-emerald-900/60 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/40 text-sm font-semibold text-emerald-700 dark:text-emerald-300 flex items-center justify-between">
+                <span>✓ Linked: {telegramStatus.telegram_username || 'Telegram Account'}</span>
+                <span className="text-xs text-slate-500 dark:text-slate-400">Auto-filled</span>
+              </div>
             ) : (
-              <input
-                type="text"
-                placeholder="Telegram Chat ID"
-                value={telegramChatId}
-                onChange={(e) => setTelegramChatId(e.target.value)}
-                className="p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 transition-colors"
-                required
-              />
+              <div className="p-3 border border-amber-200 dark:border-amber-900/60 rounded-xl bg-amber-50/60 dark:bg-amber-950/40 text-xs font-semibold text-amber-800 dark:text-amber-300 flex items-center justify-between">
+                <span>Telegram Not Connected</span>
+                <button
+                  type="button"
+                  onClick={handleGenerateConnectCode}
+                  className="underline font-bold text-amber-900 dark:text-amber-200"
+                >
+                  Connect Now
+                </button>
+              </div>
             )}
             <input
               type="number"
@@ -477,15 +598,10 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
               required
             />
           </div>
-          {notificationChannel === 'telegram' && (
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              To get your Chat ID: message your bot on Telegram, then visit <code className="bg-slate-100 dark:bg-slate-700 px-1 rounded">https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code> to find it.
-            </p>
-          )}
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="submit"
-              disabled={isSettingAlert}
+              disabled={isSettingAlert || (notificationChannel === 'telegram' && !telegramStatus?.is_connected)}
               className="bg-indigo-600 dark:bg-indigo-500 hover:bg-indigo-700 dark:hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors disabled:opacity-50 shadow-md shadow-indigo-200 dark:shadow-none flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             >
               {isSettingAlert ? (
@@ -517,52 +633,46 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
           {alerts.length === 0 ? (
             <EmptyState
               title="No Active Alerts"
-              description="Create a price threshold alert to receive WhatsApp notifications when prices drop."
+              description="Create a price threshold alert to receive notifications when prices drop."
               className="py-8"
             />
           ) : (
-             <div className="overflow-x-auto border border-slate-100 dark:border-slate-700/60 rounded-xl">
-              <table className="w-full text-left text-sm text-slate-700 dark:text-slate-300">
-                <thead className="bg-slate-50 dark:bg-slate-700/40 text-xs font-bold text-slate-500 dark:text-slate-400 uppercase border-b border-slate-100 dark:border-slate-700/60">
+            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-left text-sm text-slate-600 dark:text-slate-300">
+                <thead className="bg-slate-50 dark:bg-slate-900/60 text-slate-700 dark:text-slate-200 text-xs uppercase font-bold tracking-wider">
                   <tr>
+                    <th className="p-3">Target Price</th>
                     <th className="p-3">Channel</th>
                     <th className="p-3">Destination</th>
-                    <th className="p-3">Target Price</th>
                     <th className="p-3">Status</th>
                     <th className="p-3 text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700/40">
-                  {alerts.map(alert => (
-                    <tr key={alert.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
-                      <td className="p-3">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                          (alert.notification_channel || 'whatsapp') === 'telegram'
-                            ? 'bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-400 border border-sky-100 dark:border-sky-900/50'
-                            : 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/50'
-                        }`}>
-                          {(alert.notification_channel || 'whatsapp') === 'telegram' ? '✈️ Telegram' : '📱 WhatsApp'}
-                        </span>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                  {alerts.map((alert) => (
+                    <tr key={alert.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/30 transition-colors">
+                      <td className="p-3 font-bold text-slate-900 dark:text-slate-100">₹{alert.threshold_price?.toLocaleString('en-IN')}</td>
+                      <td className="p-3 font-semibold">
+                        {(alert.notification_channel || 'whatsapp') === 'telegram' ? '✈️ Telegram' : '📱 WhatsApp'}
                       </td>
-                      <td className="p-3 font-semibold text-slate-800 dark:text-slate-100">
+                      <td className="p-3 font-mono text-xs">
                         {(alert.notification_channel || 'whatsapp') === 'telegram'
-                          ? (alert.telegram_chat_id || '—')
+                          ? (telegramStatus?.telegram_username || alert.telegram_chat_id || '—')
                           : (alert.phone_number || '—')}
                       </td>
-                      <td className="p-3 font-bold text-indigo-600 dark:text-indigo-400">₹{alert.threshold_price?.toLocaleString()}</td>
                       <td className="p-3">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                          alert.is_triggered ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/50' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400'
+                        <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                          alert.status === 'ACTIVE' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-300'
                         }`}>
-                          {alert.is_triggered ? 'Triggered' : 'Active'}
+                          {alert.status}
                         </span>
                       </td>
                       <td className="p-3 text-right">
                         <button
                           onClick={() => handleDeleteAlert(alert.id)}
-                          className="text-xs font-bold text-rose-600 dark:text-rose-400 hover:text-rose-800 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/50 px-2.5 py-1 rounded-lg transition-colors"
+                          className="text-rose-600 hover:text-rose-800 dark:text-rose-400 dark:hover:text-rose-300 font-semibold text-xs transition-colors"
                         >
-                          Remove
+                          Delete
                         </button>
                       </td>
                     </tr>
@@ -574,7 +684,7 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
         </div>
       </div>
 
-      {/* Direct Test Notification */}
+      {/* Direct Notification Test Card */}
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 p-6 shadow-sm space-y-4 transition-colors">
         <div>
           <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
@@ -609,13 +719,25 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
             <div>
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Destination</label>
-              <input
-                type="text"
-                placeholder={testChannel === 'telegram' ? "Telegram Chat ID" : "WhatsApp (+91...)"}
-                value={testDestination}
-                onChange={(e) => setTestDestination(e.target.value)}
-                className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 transition-colors"
-              />
+              {testChannel === 'telegram' ? (
+                telegramStatus?.is_connected ? (
+                  <div className="p-3 border border-emerald-200 dark:border-emerald-900/60 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/40 text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                    ✓ {telegramStatus.telegram_username || 'Linked Telegram Account'}
+                  </div>
+                ) : (
+                  <div className="p-3 border border-amber-200 dark:border-amber-900/60 rounded-xl bg-amber-50/60 dark:bg-amber-950/40 text-xs font-semibold text-amber-800 dark:text-amber-300">
+                    Telegram Not Connected
+                  </div>
+                )
+              ) : (
+                <input
+                  type="text"
+                  placeholder="WhatsApp (+91...)"
+                  value={testDestination}
+                  onChange={(e) => setTestDestination(e.target.value)}
+                  className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-900/80 text-slate-800 dark:text-slate-100 transition-colors"
+                />
+              )}
             </div>
 
             <div>
@@ -632,13 +754,78 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
           <button
             type="submit"
-            disabled={isSendingTest}
+            disabled={isSendingTest || (testChannel === 'telegram' && !telegramStatus?.is_connected)}
             className="bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600 text-white font-bold py-3 px-6 rounded-xl text-sm transition-colors shadow-md disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {isSendingTest ? 'Sending Test...' : '🔔 Send Test Notification'}
           </button>
         </form>
       </div>
+
+      {/* Connect Telegram Modal Overlay */}
+      {connectModalOpen && connectCodeData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 dark:border-slate-700 space-y-5 transition-colors">
+            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-700 pb-3">
+              <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <span>✈️ Connect Telegram</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setConnectModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg font-bold p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <p className="text-sm text-slate-600 dark:text-slate-300">
+                To link your account, open Telegram and send this single-use command to our bot:
+              </p>
+
+              <div className="bg-slate-100 dark:bg-slate-900/80 p-4 rounded-xl border border-slate-200 dark:border-slate-700 text-center space-y-2">
+                <div className="text-xs uppercase font-bold tracking-wider text-slate-400">Connection Command</div>
+                <div className="text-xl font-mono font-extrabold text-indigo-600 dark:text-indigo-400 select-all">
+                  /connect {connectCodeData.code}
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Valid for 15 minutes
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(`/connect ${connectCodeData.code}`);
+                    if (showToast) showToast('Command copied to clipboard!', 'info');
+                  }}
+                  className="flex-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-200 font-bold py-2.5 px-4 rounded-xl text-xs transition-colors text-center"
+                >
+                  📋 Copy Command
+                </button>
+                <a
+                  href={`https://t.me/${connectCodeData.bot_username || 'Trakermolt_bot'}?start=connect`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 text-white font-bold py-2.5 px-4 rounded-xl text-xs transition-colors text-center shadow-sm"
+                >
+                  ✈️ Open Telegram
+                </a>
+              </div>
+
+              <div className="flex items-center justify-center gap-2 pt-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+                <svg className="w-4 h-4 animate-spin text-indigo-600" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                <span>Waiting for Telegram message...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

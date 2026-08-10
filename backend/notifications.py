@@ -118,6 +118,33 @@ def get_notifier(channel: str) -> NotificationProvider:
     else:
         raise ValueError(f"Unsupported notification channel: '{channel}'. Supported: {SUPPORTED_CHANNELS}")
 
+def resolve_alert_destination(db, alert) -> str | None:
+    """
+    Resolves the current active destination for an alert threshold.
+    
+    Precedence & Disconnect Rules for Telegram:
+    1. CONNECTED: If NotificationPreference exists for alert.user_id and pref.telegram_chat_id is set -> Return pref.telegram_chat_id.
+    2. DISCONNECTED: If NotificationPreference exists for alert.user_id but pref.telegram_chat_id is None -> Return None (MUST NOT fall back to historical alert.telegram_chat_id).
+    3. LEGACY RECORD: If no NotificationPreference record exists for alert.user_id (or alert.user_id is None) -> Fall back to alert.telegram_chat_id.
+    """
+    channel = getattr(alert, "notification_channel", "whatsapp") or "whatsapp"
+    if channel == "telegram":
+        user_id = getattr(alert, "user_id", None)
+        if user_id is not None:
+            from backend.models import NotificationPreference
+            pref = db.query(NotificationPreference).filter(
+                NotificationPreference.user_id == user_id
+            ).first()
+            if pref:
+                # Explicit preference record exists: return linked chat_id (or None if disconnected)
+                return pref.telegram_chat_id
+        # Fallback for legacy alerts where no NotificationPreference record exists or user_id is None
+        return getattr(alert, "telegram_chat_id", None)
+    else:
+        return getattr(alert, "phone_number", None)
+
+
+
 def build_alert_confirmation_message(
     product_title: str,
     platform: str,

@@ -6,6 +6,10 @@ All tests use mocked HTTP — no real Telegram API calls.
 import pytest
 import os
 from unittest.mock import patch, MagicMock
+from backend.main import run_db_migrations
+
+run_db_migrations()
+
 
 
 # --------------------------------------------------------------------------- #
@@ -704,5 +708,399 @@ class TestNotificationPreferencesAndDirectTrigger:
             assert existing_alert.phone_number == "whatsapp:+911111111111"
         finally:
             db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 6. Telegram Account Linking & Webhook Redesign Tests
+# --------------------------------------------------------------------------- #
+
+class TestTelegramAccountLinking:
+    """Tests for secure Telegram account linking, /connect codes, and webhooks."""
+
+    def test_generate_connect_code(self):
+        """Generates secure 6-character connect code with 15-minute expiration."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, TelegramConnectCode
+        from backend.api_routes import generate_telegram_connect_code
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Code User", email=f"code_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            req = Request({"type": "http", "path": "/telegram/connect-code", "client": ("127.0.0.1", 12345), "headers": []})
+            res = generate_telegram_connect_code(request=req, current_user=user, db=db)
+
+            assert "code" in res
+            assert len(res["code"]) == 6
+            assert "expires_at" in res
+
+            code_rec = db.query(TelegramConnectCode).filter(TelegramConnectCode.code == res["code"]).first()
+            assert code_rec is not None
+            assert code_rec.user_id == user.id
+            assert code_rec.is_used is False
+        finally:
+            db.close()
+
+    @patch("backend.notifications.requests.post")
+    def test_successful_telegram_connect_flow(self, mock_post):
+        """Simulates Telegram /connect <CODE> webhook command linking account."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference
+        from backend.api_routes import generate_telegram_connect_code, process_telegram_update, get_telegram_status
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"ok": True}
+
+            user = User(name="Link User", email=f"link_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            req = Request({"type": "http", "path": "/telegram/connect-code", "client": ("127.0.0.1", 12345), "headers": []})
+            code_res = generate_telegram_connect_code(request=req, current_user=user, db=db)
+            code = code_res["code"]
+
+            # Webhook update payload from Telegram
+            update_payload = {
+                "update_id": 101,
+                "message": {
+                    "chat": {"id": 987654321},
+                    "from": {"username": "koushik_dev"},
+                    "text": f"/connect {code}"
+                }
+            }
+
+            res = process_telegram_update(db, update_payload)
+            assert res["status"] == "success"
+            assert res["user_id"] == user.id
+
+            pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == user.id).first()
+            assert pref.telegram_chat_id == "987654321"
+            assert pref.telegram_username == "@koushik_dev"
+            assert pref.telegram_connected_at is not None
+
+            # Verify GET /telegram/status returns connected
+            status_res = get_telegram_status(current_user=user, db=db)
+            assert status_res["is_connected"] is True
+            assert status_res["telegram_username"] == "@koushik_dev"
+        finally:
+            db.close()
+
+    @patch("backend.notifications.requests.post")
+    def test_expired_connect_code(self, mock_post):
+        """Rejects code if expired (> 15 minutes old)."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, TelegramConnectCode
+        from backend.api_routes import process_telegram_update
+        import datetime, uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"ok": True}
+
+            user = User(name="Expired User", email=f"exp_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            exp_code = f"EXP{uuid.uuid4().hex[:3].upper()}"
+            old_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=20)
+            old_time_naive = old_time.replace(tzinfo=None)
+            code_rec = TelegramConnectCode(user_id=user.id, code=exp_code, created_at=old_time_naive, expires_at=old_time_naive, is_used=False)
+            db.add(code_rec)
+            db.commit()
+
+            update_payload = {
+                "message": {
+                    "chat": {"id": 11111},
+                    "text": f"/connect {exp_code}"
+                }
+            }
+
+            res = process_telegram_update(db, update_payload)
+            assert res["status"] == "error"
+            assert "expired" in res["reason"].lower()
+        finally:
+            db.close()
+
+    @patch("backend.notifications.requests.post")
+    def test_invalid_connect_code(self, mock_post):
+        """Rejects non-existent connection code."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.api_routes import process_telegram_update
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"ok": True}
+
+            update_payload = {
+                "message": {
+                    "chat": {"id": 22222},
+                    "text": "/connect BOGUS99"
+                }
+            }
+
+            res = process_telegram_update(db, update_payload)
+            assert res["status"] == "error"
+        finally:
+            db.close()
+
+    @patch("backend.notifications.requests.post")
+    def test_duplicate_connect_code_attempt(self, mock_post):
+        """Prevents single-use code from being redeemed twice."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User
+        from backend.api_routes import generate_telegram_connect_code, process_telegram_update
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"ok": True}
+
+            user = User(name="Dup User", email=f"dup_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            req = Request({"type": "http", "path": "/telegram/connect-code", "client": ("127.0.0.1", 12345), "headers": []})
+            code = generate_telegram_connect_code(request=req, current_user=user, db=db)["code"]
+
+            update_payload = {
+                "message": {
+                    "chat": {"id": 33333},
+                    "text": f"/connect {code}"
+                }
+            }
+
+            # First redemption -> Success
+            res1 = process_telegram_update(db, update_payload)
+            assert res1["status"] == "success"
+
+            # Second redemption -> Rejected
+            res2 = process_telegram_update(db, update_payload)
+            assert res2["status"] == "error"
+        finally:
+            db.close()
+
+    @patch("backend.notifications.requests.post")
+    def test_wrong_user_isolation(self, mock_post):
+        """Generates codes independently for User A and User B."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference
+        from backend.api_routes import generate_telegram_connect_code, process_telegram_update
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"ok": True}
+
+            user_a = User(name="User A", email=f"usera_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            user_b = User(name="User B", email=f"userb_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add_all([user_a, user_b])
+            db.commit()
+
+            req = Request({"type": "http", "path": "/telegram/connect-code", "client": ("127.0.0.1", 12345), "headers": []})
+            code_a = generate_telegram_connect_code(request=req, current_user=user_a, db=db)["code"]
+
+            # User A redeems code_a
+            process_telegram_update(db, {"message": {"chat": {"id": 10001}, "from": {"username": "user_a_tg"}, "text": f"/connect {code_a}"}})
+
+            pref_a = db.query(NotificationPreference).filter(NotificationPreference.user_id == user_a.id).first()
+            pref_b = db.query(NotificationPreference).filter(NotificationPreference.user_id == user_b.id).first()
+
+            assert pref_a.telegram_chat_id == "10001"
+            assert pref_b is None or pref_b.telegram_chat_id is None
+        finally:
+            db.close()
+
+    @patch("backend.notifications.requests.post")
+    def test_disconnect_flow(self, mock_post):
+        """Verifies Telegram disconnect flow clears preference fields."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference
+        from backend.api_routes import disconnect_telegram, get_telegram_status
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Dis User", email=f"dis_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            pref = NotificationPreference(user_id=user.id, telegram_chat_id="44444", telegram_username="@dis_user")
+            db.add(pref)
+            db.commit()
+
+            req = Request({"type": "http", "path": "/telegram/disconnect", "client": ("127.0.0.1", 12345), "headers": []})
+            disconnect_telegram(request=req, current_user=user, db=db)
+
+            status_res = get_telegram_status(current_user=user, db=db)
+            assert status_res["is_connected"] is False
+            assert status_res["telegram_username"] is None
+        finally:
+            db.close()
+
+    def test_webhook_secret_header_validation(self):
+        """Verifies POST /telegram/webhook rejects unauthorized secret headers."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.api_routes import telegram_webhook
+        from backend.config import settings
+        from starlette.requests import Request
+        from fastapi import HTTPException
+        from unittest.mock import patch
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            with patch.object(settings, "TELEGRAM_WEBHOOK_SECRET", "my-secret-token-123"):
+                # Unauthorized request without header
+                bad_req = Request({"type": "http", "path": "/telegram/webhook", "client": ("127.0.0.1", 12345), "headers": []})
+                with pytest.raises(HTTPException) as exc_info:
+                    telegram_webhook(request=bad_req, payload={"update_id": 1}, db=db)
+                assert exc_info.value.status_code == 403
+
+                # Authorized request with secret header
+                headers = [(b"x-telegram-bot-api-secret-token", b"my-secret-token-123")]
+                good_req = Request({"type": "http", "path": "/telegram/webhook", "client": ("127.0.0.1", 12345), "headers": headers})
+                res = telegram_webhook(request=good_req, payload={"update_id": 1}, db=db)
+                assert res["ok"] is True
+        finally:
+            db.close()
+
+
+class TestResolveAlertDestinationPrecedence:
+    """Tests for resolve_alert_destination() guaranteeing no delivery to stale chat IDs upon disconnect."""
+
+    def test_connected_state_uses_current_chat_id(self):
+        """CONNECTED: Returns NotificationPreference.telegram_chat_id."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference, AlertThreshold
+        from backend.notifications import resolve_alert_destination
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Conn User", email=f"conn_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            pref = NotificationPreference(user_id=user.id, telegram_chat_id="77777")
+            alert = AlertThreshold(user_id=user.id, notification_channel="telegram", telegram_chat_id="99999", threshold_price=100.0)
+            db.add_all([pref, alert])
+            db.commit()
+
+            dest = resolve_alert_destination(db, alert)
+            assert dest == "77777"
+        finally:
+            db.close()
+
+    def test_disconnected_state_returns_none_and_never_uses_stale_chat_id(self):
+        """DISCONNECTED: NotificationPreference exists with telegram_chat_id=None -> MUST return None."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference, AlertThreshold
+        from backend.notifications import resolve_alert_destination
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Disconn User", email=f"disconn_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            # Disconnected preference (telegram_chat_id is None)
+            pref = NotificationPreference(user_id=user.id, telegram_chat_id=None)
+            # Historical alert record contains old chat_id "11111"
+            alert = AlertThreshold(user_id=user.id, notification_channel="telegram", telegram_chat_id="11111", threshold_price=100.0)
+            db.add_all([pref, alert])
+            db.commit()
+
+            dest = resolve_alert_destination(db, alert)
+            assert dest is None, "CRITICAL: Must return None and NOT fall back to historical chat ID '11111' when user is explicitly disconnected!"
+        finally:
+            db.close()
+
+    def test_legacy_record_fallback(self):
+        """LEGACY RECORD: No NotificationPreference record exists -> falls back to alert.telegram_chat_id."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, AlertThreshold
+        from backend.notifications import resolve_alert_destination
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Legacy User", email=f"legacy_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            # No NotificationPreference record created for user
+            alert = AlertThreshold(user_id=user.id, notification_channel="telegram", telegram_chat_id="22222", threshold_price=100.0)
+            db.add(alert)
+            db.commit()
+
+            dest = resolve_alert_destination(db, alert)
+            assert dest == "22222"
+        finally:
+            db.close()
+
+    def test_reconnected_state_uses_new_chat_id(self):
+        """RECONNECTED: NotificationPreference updated with new telegram_chat_id -> returns new chat_id."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, NotificationPreference, AlertThreshold
+        from backend.notifications import resolve_alert_destination
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Reconn User", email=f"reconn_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            pref = NotificationPreference(user_id=user.id, telegram_chat_id="33333")
+            alert = AlertThreshold(user_id=user.id, notification_channel="telegram", telegram_chat_id="11111", threshold_price=100.0)
+            db.add_all([pref, alert])
+            db.commit()
+
+            dest = resolve_alert_destination(db, alert)
+            assert dest == "33333"
+        finally:
+            db.close()
+
+
+
 
 
