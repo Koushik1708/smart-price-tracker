@@ -611,4 +611,98 @@ class TestNotificationPreferencesAndDirectTrigger:
         finally:
             db.close()
 
+    @patch("backend.api_routes.get_notifier")
+    def test_global_account_level_preferences_across_products(self, mock_get_notifier):
+        """User preferences are account-level and automatically reused for Product A and Product B."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, Product, AlertThreshold, NotificationPreference
+        from backend.api_routes import create_alert, AlertCreate, update_notification_preferences, NotificationPreferenceSchema
+        from unittest.mock import MagicMock
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Global User", email=f"global_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            req_pref = Request({"type": "http", "path": "/notification-preferences", "client": ("127.0.0.1", 12345), "headers": []})
+            pref_payload = NotificationPreferenceSchema(
+                default_phone_number="+919390948443",
+                default_telegram_chat_id="8010225684",
+                default_notification_channel="whatsapp"
+            )
+            update_notification_preferences(request=req_pref, preferences=pref_payload, current_user=user, db=db)
+
+            # Product A
+            prod_a = Product(user_id=user.id, url=f"https://www.amazon.in/dp/B0{uuid.uuid4().hex[:6]}", title="Product A", platform="amazon")
+            # Product B
+            prod_b = Product(user_id=user.id, url=f"https://www.amazon.in/dp/B0{uuid.uuid4().hex[:6]}", title="Product B", platform="amazon")
+            db.add_all([prod_a, prod_b])
+            db.commit()
+
+            mock_notifier = MagicMock()
+            mock_notifier.send_alert.return_value = True
+            mock_get_notifier.return_value = mock_notifier
+
+            req_alert = Request({"type": "http", "path": "/products/1/alerts", "client": ("127.0.0.1", 12345), "headers": []})
+
+            # Create Alert for Product A (WhatsApp using account default)
+            alert_a_payload = AlertCreate(threshold_price=700.0, notification_channel="whatsapp")
+            res_a = create_alert(request=req_alert, product_id=prod_a.id, alert=alert_a_payload, current_user=user, db=db)
+            assert res_a["phone_number"] == "whatsapp:+919390948443"
+
+            # Create Alert for Product B (Telegram using account default)
+            alert_b_payload = AlertCreate(threshold_price=1200.0, notification_channel="telegram")
+            res_b = create_alert(request=req_alert, product_id=prod_b.id, alert=alert_b_payload, current_user=user, db=db)
+            assert res_b["telegram_chat_id"] == "8010225684"
+
+        finally:
+            db.close()
+
+    @patch("backend.api_routes.get_notifier")
+    def test_updating_preference_does_not_modify_existing_alerts(self, mock_get_notifier):
+        """Updating user default preferences does NOT alter historical AlertThreshold records."""
+        from backend.database import Base, engine, SessionLocal
+        from backend.models import User, Product, AlertThreshold
+        from backend.api_routes import create_alert, AlertCreate, update_notification_preferences, NotificationPreferenceSchema
+        from unittest.mock import MagicMock
+        from starlette.requests import Request
+        import uuid
+
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+
+        try:
+            user = User(name="Hist User", email=f"hist_{uuid.uuid4().hex[:6]}@example.com", password_hash="hash")
+            db.add(user)
+            db.commit()
+
+            prod = Product(user_id=user.id, url=f"https://www.amazon.in/dp/B0{uuid.uuid4().hex[:6]}", title="Product Hist", platform="amazon")
+            db.add(prod)
+            db.commit()
+
+            mock_notifier = MagicMock()
+            mock_notifier.send_alert.return_value = True
+            mock_get_notifier.return_value = mock_notifier
+
+            # Step 1: User sets initial preference (+911111111111) & creates alert
+            req = Request({"type": "http", "path": "/notification-preferences", "client": ("127.0.0.1", 12345), "headers": []})
+            update_notification_preferences(request=req, preferences=NotificationPreferenceSchema(default_phone_number="+911111111111"), current_user=user, db=db)
+            
+            res1 = create_alert(request=req, product_id=prod.id, alert=AlertCreate(threshold_price=500.0, notification_channel="whatsapp"), current_user=user, db=db)
+            alert_id = res1["id"]
+
+            # Step 2: User changes global default preference to +912222222222
+            update_notification_preferences(request=req, preferences=NotificationPreferenceSchema(default_phone_number="+912222222222"), current_user=user, db=db)
+
+            # Step 3: Verify existing alert retains original destination (+911111111111)
+            existing_alert = db.query(AlertThreshold).filter(AlertThreshold.id == alert_id).first()
+            assert existing_alert.phone_number == "whatsapp:+911111111111"
+        finally:
+            db.close()
+
 

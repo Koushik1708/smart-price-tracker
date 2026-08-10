@@ -61,19 +61,17 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
   const fetchPreferences = useCallback(async () => {
     try {
-      const res = await apiClient.get('/notifications/preferences');
+      const res = await apiClient.get('/notification-preferences');
       if (res.data && isComponentMounted.current) {
         setPreferences(res.data);
         const defaultCh = res.data.default_notification_channel || 'whatsapp';
         setNotificationChannel(defaultCh);
         setTestChannel(defaultCh);
-        if (res.data.whatsapp_phone_number) {
-          setPhoneNumber(res.data.whatsapp_phone_number);
-        }
-        if (res.data.telegram_chat_id) {
-          setTelegramChatId(res.data.telegram_chat_id);
-        }
-        setTestDestination(defaultCh === 'telegram' ? (res.data.telegram_chat_id || '') : (res.data.whatsapp_phone_number || ''));
+        const phone = res.data.default_phone_number || res.data.whatsapp_phone_number || '';
+        const tgId = res.data.default_telegram_chat_id || res.data.telegram_chat_id || '';
+        setPhoneNumber(phone);
+        setTelegramChatId(tgId);
+        setTestDestination(defaultCh === 'telegram' ? tgId : phone);
       }
     } catch (err) {
       console.warn("Failed to load notification preferences", err);
@@ -82,14 +80,16 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
 
   useEffect(() => {
     fetchPreferences();
-  }, [fetchPreferences]);
+  }, [productId, fetchPreferences]);
 
   const handleChannelChange = (ch) => {
     setNotificationChannel(ch);
-    if (ch === 'telegram' && preferences?.telegram_chat_id) {
-      setTelegramChatId(preferences.telegram_chat_id);
-    } else if (ch === 'whatsapp' && preferences?.whatsapp_phone_number) {
-      setPhoneNumber(preferences.whatsapp_phone_number);
+    const phone = preferences?.default_phone_number || preferences?.whatsapp_phone_number || '';
+    const tgId = preferences?.default_telegram_chat_id || preferences?.telegram_chat_id || '';
+    if (ch === 'telegram' && tgId) {
+      setTelegramChatId(tgId);
+    } else if (ch === 'whatsapp' && phone) {
+      setPhoneNumber(phone);
     }
   };
 
@@ -97,13 +97,15 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
     e.preventDefault();
     setIsSavingPrefs(true);
     try {
-      const res = await apiClient.put('/notifications/preferences', {
+      const res = await apiClient.put('/notification-preferences', {
+        default_phone_number: phoneNumber,
         whatsapp_phone_number: phoneNumber,
+        default_telegram_chat_id: telegramChatId,
         telegram_chat_id: telegramChatId,
         default_notification_channel: notificationChannel
       });
       setPreferences(res.data);
-      if (showToast) showToast('Notification preferences saved successfully!', 'success');
+      if (showToast) showToast('Global notification preferences saved successfully!', 'success');
     } catch (err) {
       if (showToast) showToast(err.customMessage || 'Failed to save preferences', 'error');
     } finally {
@@ -222,9 +224,7 @@ export default function ProductDashboard({ productId, onProductDeleted, onProduc
     setIsSettingAlert(true);
     apiClient.post(`/products/${productId}/alerts`, payload).then(res => {
       setAlerts(prev => [...prev, res.data]);
-      setPhoneNumber('');
       setThresholdPrice('');
-      setTelegramChatId('');
       if (showToast) {
         if (res.data.confirmation_sent) {
           showToast('Price alert active & confirmation message sent!', 'success');

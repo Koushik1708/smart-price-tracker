@@ -833,9 +833,11 @@ def delete_alert(alert_id: int, current_user: User = Depends(get_current_user), 
 # --------------------------------------------------------------------------- #
 
 class NotificationPreferenceSchema(BaseModel):
-    whatsapp_phone_number: Optional[str] = None
-    telegram_chat_id: Optional[str] = None
     default_notification_channel: Optional[str] = "whatsapp"
+    default_phone_number: Optional[str] = None
+    whatsapp_phone_number: Optional[str] = None
+    default_telegram_chat_id: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
 
     @field_validator('default_notification_channel')
     @classmethod
@@ -856,6 +858,7 @@ class DirectNotificationRequest(BaseModel):
             raise ValueError(f"Unsupported channel: '{v}'. Must be one of: {SUPPORTED_CHANNELS}")
         return v
 
+@router.get("/notification-preferences", response_model=NotificationPreferenceSchema)
 @router.get("/notifications/preferences", response_model=NotificationPreferenceSchema)
 def get_notification_preferences(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
@@ -864,13 +867,20 @@ def get_notification_preferences(current_user: User = Depends(get_current_user),
         db.add(pref)
         db.commit()
         db.refresh(pref)
+    phone = pref.whatsapp_phone_number
+    tg_id = pref.telegram_chat_id
+    ch = pref.default_notification_channel or "whatsapp"
     return {
-        "whatsapp_phone_number": pref.whatsapp_phone_number,
-        "telegram_chat_id": pref.telegram_chat_id,
-        "default_notification_channel": pref.default_notification_channel or "whatsapp"
+        "default_notification_channel": ch,
+        "default_phone_number": phone,
+        "whatsapp_phone_number": phone,
+        "default_telegram_chat_id": tg_id,
+        "telegram_chat_id": tg_id
     }
 
+@router.put("/notification-preferences", response_model=NotificationPreferenceSchema)
 @router.put("/notifications/preferences", response_model=NotificationPreferenceSchema)
+@router.patch("/notification-preferences", response_model=NotificationPreferenceSchema)
 @router.patch("/notifications/preferences", response_model=NotificationPreferenceSchema)
 def update_notification_preferences(
     request: Request,
@@ -884,14 +894,16 @@ def update_notification_preferences(
         pref = NotificationPreference(user_id=current_user.id)
         db.add(pref)
     
-    if preferences.whatsapp_phone_number is not None:
-        val = preferences.whatsapp_phone_number.strip() if preferences.whatsapp_phone_number else None
+    input_phone = preferences.default_phone_number if preferences.default_phone_number is not None else preferences.whatsapp_phone_number
+    if input_phone is not None:
+        val = input_phone.strip() if input_phone else None
         if val and val.startswith("+"):
             val = f"whatsapp:{val}"
         pref.whatsapp_phone_number = val
 
-    if preferences.telegram_chat_id is not None:
-        pref.telegram_chat_id = preferences.telegram_chat_id.strip() if preferences.telegram_chat_id else None
+    input_tg = preferences.default_telegram_chat_id if preferences.default_telegram_chat_id is not None else preferences.telegram_chat_id
+    if input_tg is not None:
+        pref.telegram_chat_id = input_tg.strip() if input_tg else None
 
     if preferences.default_notification_channel:
         pref.default_notification_channel = preferences.default_notification_channel
@@ -900,10 +912,15 @@ def update_notification_preferences(
     db.refresh(pref)
 
     log_audit_event(db, action="NOTIFICATION_PREFERENCES_UPDATED", outcome="SUCCESS", user_id=current_user.id, request=request)
+    phone = pref.whatsapp_phone_number
+    tg_id = pref.telegram_chat_id
+    ch = pref.default_notification_channel or "whatsapp"
     return {
-        "whatsapp_phone_number": pref.whatsapp_phone_number,
-        "telegram_chat_id": pref.telegram_chat_id,
-        "default_notification_channel": pref.default_notification_channel or "whatsapp"
+        "default_notification_channel": ch,
+        "default_phone_number": phone,
+        "whatsapp_phone_number": phone,
+        "default_telegram_chat_id": tg_id,
+        "telegram_chat_id": tg_id
     }
 
 @router.post("/notifications/test")
